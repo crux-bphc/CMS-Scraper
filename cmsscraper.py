@@ -25,9 +25,10 @@ re_sanitize = re.compile(r"[<>:\"/\\|?*]|\.\.")
 
 def main():
     global user_id
+    global token
 
     if token == "":
-        input("Enter token")
+        token = input("Enter token")
 
     response = requests.request("get", api_check_token.format(token))
     if response.status_code == 200:
