@@ -1,5 +1,6 @@
 #! python3
 import argparse
+import concurrent.futures
 import html
 import json
 import os
@@ -15,6 +16,15 @@ from bs4 import BeautifulSoup
 WEB_SERVER = "https://td.bits-hyderabad.ac.in/moodle/"
 
 VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
+
+# Set this to the course category name to fetch courses from a specific category.
+# Set to a falsy to ignore category names.
+# An example category is "Semester II 2019-20". There can be multiple cataegories
+# for example if one semester does not before another begins and there is a
+# reason to maintain courses from both semester. This was the case with Sem II of
+# 2019-20 and the Summer term (and possible Sem I 2020-21) due to the Covid-19
+# pandemic.
+COURSE_CATEGORY_NAME = "Semester II - 2019-20"
 
 # API Endpoints
 API_BASE = WEB_SERVER + "webservice/rest/server.php?"
@@ -32,7 +42,7 @@ API_GET_FORUM_DISCUSSIONS = API_BASE + "wsfunction=mod_forum_get_forum_discussio
 SITE_DASHBOARD = "my/"
 SITE_COURSE = "course/view.php?id={0}"
 
-BASE_DIR = os.getcwd() + "/CMS/"
+BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
 TOKEN = "78709b6d29b278f352835dc89d5f3b5a"
 
@@ -131,6 +141,7 @@ def enrol_course(id, fullname):
 
 def download_all():
     directories = enquee_all_downloads()
+    print("Starting downloads")
     start_downloads()
     # delete all empty diretories
     for d in reversed(directories):
@@ -149,79 +160,109 @@ def enquee_all_downloads():
     # holds the list of directories created... all empty directories will be deleted as part of cleanup
     directories = []
 
-    for course in courses:
-        full_name = html.unescape(course["fullname"])
+    print("Enqueueing downloads")
 
-        match = regex.match(full_name)
-        if not match:
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for course in courses:
+            match = regex.match(html.unescape(course["fullname"]))
+            if not match:
+                continue
+            futures.append(executor.submit(enquee_course_downloads, course, match[1], match[2]))
+
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            print("Finished processing: " + ", ".join((result[0], result[1])))
+            directories.extend(result[2])
+
+    return directories
+
+
+def enquee_course_downloads(course, course_name, section_name):
+    directories = []
+
+    print("Processing: " + ", ".join((course_name, section_name)))
+    course_name = removeDisallowedFilenameChars(course_name)
+    course_dir = os.path.join(BASE_DIR, course_name, section_name)
+
+    # create folders
+    os.makedirs(course_dir, exist_ok=True)
+    directories.append(course_dir)
+
+    course_id = course["id"]
+    response = requests.request("get", API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
+    course_sections = json.loads(response.text)
+    for course_section in course_sections:
+        # create folder with name of the course_section
+        course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
+        course_section_dir = os.path.join(course_dir, course_section_name)
+        os.makedirs(course_section_dir, exist_ok=True)
+        directories.append(course_section_dir)
+
+        # Sometimes professors use section descriptions as announcements and embed file links
+        summary = course_section["summary"]
+        if summary:
+            soup = BeautifulSoup(summary, 'html.parser')
+            anchors = soup.find_all('a')
+            if anchors:
+                for anchor in anchors:
+                    link = anchor.get('href')
+                    if WEB_SERVER in link:
+                        # file is on the same domain, download it
+                        # we don't know the file name, we use w/e is provided by the server
+                        submit_download(get_final_download_link(link, TOKEN), course_section_dir, None)
+
+        if "modules" not in course_section:
             continue
 
-        print("Processing: " + match[0])
-        course_name = removeDisallowedFilenameChars(match[1])
-        course_dir = os.path.join(BASE_DIR, course_name, match[2])
+        for module in course_section["modules"]:
+            # if it's a forum, there will be discussions which each need a folder
+            module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
+            module_dir = os.path.join(course_section_dir, module_name)
+            os.makedirs(module_dir, exist_ok=True)
+            directories.append(module_dir)
 
-        # create folders
-        os.makedirs(course_dir, exist_ok=True)
-        directories.append(course_dir)
+            if module["modname"] in ("resource", "folder"):
+                for content in module["contents"]:
+                    file_url = content["fileurl"]
+                    file_url = get_final_download_link(file_url, TOKEN)
+                    if module["name"].lower() == "handout":
+                        # if the module is for handout, save the file as HANDOUT followed by the file extension
+                        file_name = "".join(("HANDOUT", content["filename"][content["filename"].rfind("."):]))
+                    else:
+                        file_name = removeDisallowedFilenameChars(content["filename"])
 
-        course_id = course["id"]
-        response = requests.request("get", API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
-        course_sections = json.loads(response.text)
-        for course_section in course_sections:
-            # create folder with name of the course_section
-            course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
-            course_section_dir = os.path.join(course_dir, course_section_name)
-            os.makedirs(course_section_dir, exist_ok=True)
-            directories.append(course_section_dir)
+                    out_path = os.path.join(module_dir, file_name)
+                    if os.path.exists(out_path) and os.path.getsize(out_path) == int(content["filesize"]):
+                        continue  # skip if we've already downloaded
+                    submit_download(file_url, module_dir, file_name)
+            elif module["modname"] == "forum":
+                forum_id = module["instance"]
+                # (0, 0) -> Returns all discussion
+                response = requests.request("get", API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
+                response_json = json.loads(response.text)
+                if "exception" in response_json:
+                    break   # probably no discussion associated with module
 
-            if "modules" in course_section:
-                for module in course_section["modules"]:
-                    # if it's a forum, there will be discussions which each need a folder
-                    module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
-                    module_dir = os.path.join(course_section_dir, module_name)
-                    os.makedirs(module_dir, exist_ok=True)
-                    directories.append(module_dir)
+                forum_discussions = json.loads(response.text)["discussions"]
+                for forum_discussion in forum_discussions:
+                    forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
+                    forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
+                    os.makedirs(forum_discussion_dir, exist_ok=True)
+                    directories.append(forum_discussion_dir)
 
-                    if module["modname"] in ("resource", "folder"):
-                        for content in module["contents"]:
-                            file_url = content["fileurl"]
+                    if not forum_discussion["attachment"] == "":
+                        for attachment in forum_discussion["attachments"]:
+                            file_url = attachment["fileurl"]
                             file_url = get_final_download_link(file_url, TOKEN)
-                            if module["name"].lower() == "handout":
-                                # if the module is for handout, save the file as HANDOUT followed by the file extension
-                                file_name = "".join(("HANDOUT_", content["filename"][content["filename"].rfind("."):]))
-                            else:
-                                file_name = removeDisallowedFilenameChars(content["filename"])
+                            out_path = os.path.join(forum_discussion_dir,
+                                                    removeDisallowedFilenameChars(attachment["filename"]))
 
-                            out_path = os.path.join(module_dir, file_name)
-                            if os.path.exists(out_path) and os.path.getsize(out_path) == content["filesize"]:
+                            if os.path.exists(out_path) and os.path.getsize(out_path) == int(attachment["filesize"]):
                                 continue  # skip if we've already downloaded
-                            submit_download(file_url, os.path.join(module_dir, file_name))
-                    elif module["modname"] == "forum":
-                        forum_id = module["instance"]
-                        # (0, 0) -> Returns all discussion
-                        response = requests.request("get", API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
-                        response_json = json.loads(response.text)
-                        if "exception" in response_json:
-                            break   # probably no discussion associated with module
-
-                        forum_discussions = json.loads(response.text)["discussions"]
-                        for forum_discussion in forum_discussions:
-                            forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
-                            forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
-                            os.makedirs(forum_discussion_dir, exist_ok=True)
-                            directories.append(forum_discussion_dir)
-
-                            if not forum_discussion["attachment"] == "":
-                                for attachment in forum_discussion["attachments"]:
-                                    file_url = attachment["fileurl"]
-                                    file_url = get_final_download_link(file_url, TOKEN)
-                                    out_path = "".join((forum_discussion_dir,
-                                                        removeDisallowedFilenameChars(attachment["filename"])))
-
-                                    if os.path.exists(out_path) and os.path.getsize(out_path) == attachment["filesize"]:
-                                        continue  # skip if we've already downloaded
-                                    submit_download(file_url, out_path)
-    return directories
+                            submit_download(file_url, forum_discussion_dir,
+                                            removeDisallowedFilenameChars(attachment["filename"]))
+    return (course_name, section_name, directories)
 
 
 def download_handouts():
@@ -313,6 +354,8 @@ def unerol_course(course, cookies):
 def get_all_courses():
     response = requests.request("get", API_GET_ALL_COURSES.format(TOKEN))
     courses = json.loads(response.text)["courses"]
+    if COURSE_CATEGORY_NAME:
+        courses = [x for x in courses if x["categoryname"] == COURSE_CATEGORY_NAME]
     return courses
 
 
@@ -323,29 +366,45 @@ def get_enrolled_courses():
 
 
 def start_downloads():
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         for item in download_queue:
             executor.submit(download_file, *item)
-        executor.shutdown(wait=True)
 
 
-def submit_download(file_url, file_name, file_ext=""):
-    download_queue.append((file_url, file_name, file_ext))
+def submit_download(file_url, file_dir, file_name, file_ext=""):
+    print("Queeuing download:", os.path.join(file_dir,file_name))
+    download_queue.append((file_url, file_dir, file_name, file_ext))
 
 
-def download_file(file_url, file_name, file_ext=""):
+def download_file(file_url, file_dir, file_name, file_ext=""):
     """Downloads the file at file_url and saves at the file_name. If file_ext is apened to end of file_name"""
-    response = requests.request("get", file_url)
-    with open(file_name + file_ext, "wb+") as f:
-        f.write(response.content)
-        print("Downloaded file " + file_name + file_ext)
-        return True
+    with requests.get(file_url, stream=True) as response:
+        check_exists = False
+        if not file_name:
+            file_name = response.headers['content-disposition']
+            file_name = re.findall("filename=\"(.+)\"", file_name)[0]
+            check_exists = True  # since file name was not known when enqueeing, we check if file exists here
 
-    return False
+        path = os.path.join(file_dir, file_name + file_ext)
+
+        if int(response.headers['content-length']) > 100 * 1024 * 1024:
+            # skip files greater than 100 MB and a blacklisted extension
+            t = [x not in path for x in ('.mp4', '.mov', '.rar')]
+            if not all(t):
+                return
+
+        # Ignore if file already exists
+        if check_exists and os.path.exists(path) and os.path.getsize(path) == int(response.headers['content-length']):
+            return
+
+        with open(path, "wb+") as f:
+            for chunk in response.iter_content(100*1024*1024):
+                f.write(chunk)
+        print("".join(("Downloaded File: ", path)))
 
 
 def get_final_download_link(file_url, token):
-    token_parameter = "".join("&token", TOKEN) if "?" in file_url else "".join((file_url, "?token=", TOKEN))
+    token_parameter = "".join(("&token=", TOKEN) if "?" in file_url else ("?token=", TOKEN))
     return "".join((file_url, token_parameter))
 
 
