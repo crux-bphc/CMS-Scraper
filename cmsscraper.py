@@ -202,7 +202,7 @@ def enquee_course_downloads(course, course_name, section_name):
         # Sometimes professors use section descriptions as announcements and embed file links
         summary = course_section["summary"]
         if summary:
-            soup = BeautifulSoup(summary, 'html.parser')
+            soup = BeautifulSoup(summary, features="lxml")
             anchors = soup.find_all('a')
             if anchors:
                 for anchor in anchors:
@@ -321,10 +321,9 @@ def unenroll_all(session_cookie):
     print("Unenrolling all courses")
 
     courses = get_enrolled_courses()
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         for course in courses:
             executor.submit(unerol_course, course, cookies)
-        executor.shutdown()
 
 
 def unerol_course(course, cookies):
@@ -333,7 +332,7 @@ def unerol_course(course, cookies):
     course_id = course["id"]
     r = session.post(WEB_SERVER + SITE_COURSE.format(course_id))
     soup = BeautifulSoup(r.content, features="lxml")
-    anchors = soup.find_all("a", id=lambda x: x and x.startswith("action_link"))
+    anchors = soup.find_all("a", href=re.compile("unenrolself.php"))
     if anchors:
         unenrol = anchors[0]["href"]
         r = session.post(unenrol)
@@ -372,7 +371,6 @@ def start_downloads():
 
 
 def submit_download(file_url, file_dir, file_name, file_ext=""):
-    print("Queeuing download:", os.path.join(file_dir,file_name))
     download_queue.append((file_url, file_dir, file_name, file_ext))
 
 
