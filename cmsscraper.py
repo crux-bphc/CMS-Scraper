@@ -24,7 +24,9 @@ VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 # reason to maintain courses from both semester. This was the case with Sem II of
 # 2019-20 and the Summer term (and possible Sem I 2020-21) due to the Covid-19
 # pandemic.
-COURSE_CATEGORY_NAME = "Semester II - 2019-20"
+COURSE_CATEGORY_NAME = "Summer Term 2020"
+
+COURSE_NAME_REGEX = r"^([\w\d \-'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
 # API Endpoints
 API_BASE = WEB_SERVER + "webservice/rest/server.php?"
@@ -142,7 +144,11 @@ def enrol_course(id, fullname):
 def download_all():
     directories = enquee_all_downloads()
     print("Starting downloads")
-    start_downloads()
+    if download_queue:
+        start_downloads()
+    else:
+        print("Nothing to download!")
+
     # delete all empty diretories
     for d in reversed(directories):
         if os.path.exists(d) and len(os.listdir(d)) == 0:
@@ -152,7 +158,7 @@ def download_all():
 def enquee_all_downloads():
     # pre-compile the regex expression
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
-    regex = re.compile(r"([\w\d /\-'&,]+) ([LTP]\d*)$")
+    regex = re.compile(COURSE_NAME_REGEX)
 
     # get the list of enrolled courses
     courses = get_enrolled_courses()
@@ -172,7 +178,7 @@ def enquee_all_downloads():
 
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
-            print("Finished processing: " + ", ".join((result[0], result[1])))
+            print("Finished processing: " + ", ".join((result[0], result[1], result[4] if len(result) == 5 else "")))
             directories.extend(result[2])
 
     return directories
@@ -181,7 +187,6 @@ def enquee_all_downloads():
 def enquee_course_downloads(course, course_name, section_name):
     directories = []
 
-    print("Processing: " + ", ".join((course_name, section_name)))
     course_name = removeDisallowedFilenameChars(course_name)
     course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
@@ -271,7 +276,7 @@ def download_handouts():
     # pre-compile the regex expression
     # the first regex group represents the course code and the name of the course
     # the second regex group represents only the course code
-    regex = re.compile(r"([\w\d /\-'&,]+) ([LTP]\d*)")
+    regex = re.compile(COURSE_NAME_REGEX)
 
     print("Downloading handouts")
 
@@ -360,14 +365,19 @@ def get_all_courses():
 
 def get_enrolled_courses():
     response = requests.request("get", API_ENROLLED_COURSES.format(TOKEN, user_id))
-    courses_enrolled = json.loads(response.text)
-    return courses_enrolled
+    return json.loads(response.text)
 
 
 def start_downloads():
     with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
         for item in download_queue:
-            executor.submit(download_file, *item)
+            futures.append(executor.submit(download_file, *item))
+
+        for future in concurrent.futures.as_completed(futures):
+            ret = future.result()
+            if ret:
+                print("Downloaded file:", ret[1])
 
 
 def submit_download(file_url, file_dir, file_name, file_ext=""):
@@ -385,25 +395,35 @@ def download_file(file_url, file_dir, file_name, file_ext=""):
 
         path = os.path.join(file_dir, file_name + file_ext)
 
-        if int(response.headers['content-length']) > 100 * 1024 * 1024:
-            # skip files greater than 100 MB and a blacklisted extension
-            t = [x not in path for x in ('.mp4', '.mov', '.rar')]
-            if not all(t):
-                return
+        # if int(response.headers['content-length']) > 100 * 1024 * 1024:
+        #     # skip files greater than 100 MB and a blacklisted extension
+        #     t = [x not in path for x in ('.mp4', '.mov', '.rar')]
+        #     if not all(t):
+        #         return
 
         # Ignore if file already exists
         if check_exists and os.path.exists(path) and os.path.getsize(path) == int(response.headers['content-length']):
             return
 
+        print("Downloading file:", file_url,
+              "Length=%s" % human_readable_sizeof_fmt(int(response.headers['content-length'])))
+
         with open(path, "wb+") as f:
             for chunk in response.iter_content(100*1024*1024):
                 f.write(chunk)
-        print("".join(("Downloaded File: ", path)))
-
+        return (True, path)
 
 def get_final_download_link(file_url, token):
     token_parameter = "".join(("&token=", TOKEN) if "?" in file_url else ("?token=", TOKEN))
     return "".join((file_url, token_parameter))
+
+
+def human_readable_sizeof_fmt(num, suffix='B'):
+    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
+        if abs(num) < 1024.0:
+            return "%3.1f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f%s%s" % (num, 'Yi', suffix)
 
 
 def removeDisallowedFilenameChars(filename):
