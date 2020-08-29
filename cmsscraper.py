@@ -24,7 +24,7 @@ VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 # reason to maintain courses from both semester. This was the case with Sem II of
 # 2019-20 and the Summer term (and possible Sem I 2020-21) due to the Covid-19
 # pandemic.
-COURSE_CATEGORY_NAME = "Summer Term 2020"
+COURSE_CATEGORY_NAME = "Semester I - 2020-21"
 
 COURSE_NAME_REGEX = r"^([\w\d \-'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
@@ -46,7 +46,7 @@ SITE_COURSE = "course/view.php?id={0}"
 
 BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
-TOKEN = "78709b6d29b278f352835dc89d5f3b5a"
+TOKEN = ""
 
 user_id = 0
 
@@ -127,12 +127,9 @@ def enrol_all_courses():
 def enroll_courses(courses):
     """Enroll to all specified courses"""
     enrolled_courses = [x['id'] for x in get_enrolled_courses()]
-
+    to_enrol = [x for x in courses if not x["id"] in enrolled_courses]
     with ThreadPoolExecutor(max_workers=25) as executor:
-        for course in courses:
-            if course["id"] in enrolled_courses:
-                continue
-            executor.submit(enrol_course, course["id"], course["fullname"])
+        executor.map(enrol_course, [x["id"] for x in to_enrol], [x["fullname"] for x in to_enrol])
         executor.shutdown(wait=True)
 
 
@@ -289,6 +286,7 @@ def download_handouts():
         match = regex.match(full_name)
         if not match:
             continue
+        print("Processing:", full_name)
         course_id = course["id"]
         response = requests.request("get", API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
         course_sections = json.loads(response.text)
@@ -369,6 +367,10 @@ def get_enrolled_courses():
 
 
 def start_downloads():
+    if not download_queue:
+        print("Nothing queued for download")
+        return
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = []
         for item in download_queue:
