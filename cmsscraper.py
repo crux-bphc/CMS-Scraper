@@ -55,7 +55,7 @@ download_queue = []
 
 def main():
 
-    global token
+    global TOKEN
     global user_id
 
     # setup CLI args
