@@ -399,6 +399,8 @@ def download_file(file_url, file_dir, file_name, file_ext=""):
     with requests.get(file_url, stream=True) as response:
         check_exists = False
         if not file_name:
+            if not 'content-disposition' in response.headers:
+                return # No name, no content-disposition, skip
             file_name = response.headers['content-disposition']
             file_name = re.findall("filename=\"(.+)\"", file_name)[0]
             check_exists = True  # since file name was not known when enqueeing, we check if file exists here
