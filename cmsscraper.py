@@ -216,10 +216,11 @@ def enquee_course_downloads(course, course_name, section_name):
             if anchors:
                 for anchor in anchors:
                     link = anchor.get('href')
-                    if WEB_SERVER in link:
-                        # file is on the same domain, download it
-                        # we don't know the file name, we use w/e is provided by the server
-                        submit_download(get_final_download_link(link, TOKEN), course_section_dir, None)
+                    if link:
+                        if WEB_SERVER in link:
+                            # file is on the same domain, download it
+                            # we don't know the file name, we use w/e is provided by the server
+                            submit_download(get_final_download_link(link, TOKEN), course_section_dir, None)
 
         if "modules" not in course_section:
             continue
