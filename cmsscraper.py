@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from bs4 import BeautifulSoup
 
-WEB_SERVER = "https://td.bits-hyderabad.ac.in/moodle/"
+WEB_SERVER = "https://cms.bits-hyderabad.ac.in/"
 
 VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 
@@ -57,11 +57,13 @@ def main():
 
     global TOKEN
     global user_id
+    global BASE_DIR
 
     # setup CLI args
     parser = argparse.ArgumentParser(prog='cmsscrapy.py')
     parser.add_argument('token', help='Moodle WebServices token')
 
+    parser.add_argument('--destination', help='The destination to download files to')
     parser.add_argument('--session-cookie', help='Session cookie obtained after logging in through a browser')
     parser.add_argument('--unenroll-all', action='store_true', help='Uneroll from all courses. ' +
                         'If --all and/or --handouts is specified, download and then unenroll all')
@@ -73,6 +75,11 @@ def main():
 
     args = parser.parse_args()
     TOKEN = args.token
+
+    if args.destination is not None:
+        BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
+                                COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
+
 
     response = requests.request("get", API_CHECK_TOKEN.format(TOKEN))
     if response.status_code == 200:
@@ -115,7 +122,7 @@ def main():
                 unenroll_all(args.session_cookie)
                 enroll_courses(enrolled_courses)
     else:
-        print("Bad response code while verifying token: " + response.status_code)
+        print("Bad response code while verifying token: " + str(response.status_code))
 
 
 def enrol_all_courses():
@@ -299,9 +306,9 @@ def download_handouts():
                         file_url = get_final_download_link(file_url, TOKEN)
                         file_ext = content["filename"][content["filename"].rfind("."):]
 
-                        short_name = removeDisallowedFilenameChars(match[1].strip())
-                        print(short_name + "_HANDOUT")
-                        if submit_download(file_url, "".join((BASE_DIR, short_name, "_HANDOUT")), file_ext=file_ext):
+                        short_name = removeDisallowedFilenameChars(match[1].strip()) + "_HANDOUT"
+                        print(short_name)
+                        if submit_download(file_url, BASE_DIR, short_name, file_ext=file_ext):
                             break
             else:
                 continue
