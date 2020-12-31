@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from bs4 import BeautifulSoup
 
-WEB_SERVER = "https://cms.bits-hyderabad.ac.in/"
+WEB_SERVER = "https://cms.bits-hyderabad.ac.in"
 
 VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 
@@ -29,7 +29,7 @@ COURSE_CATEGORY_NAME = "Semester I - 2020-21"
 COURSE_NAME_REGEX = r"^([\w\d \-'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
 # API Endpoints
-API_BASE = WEB_SERVER + "webservice/rest/server.php?"
+API_BASE = WEB_SERVER + "/webservice/rest/server.php?"
 API_CHECK_TOKEN = API_BASE + "wsfunction=core_webservice_get_site_info&moodlewsrestformat=json&wstoken={0}"
 API_ENROLLED_COURSES = API_BASE + "wsfunction=core_enrol_get_users_courses&moodlewsrestformat=json&wstoken={0}" \
                        + "&userid={1}"
@@ -41,8 +41,8 @@ API_GET_FORUM_DISCUSSIONS = API_BASE + "wsfunction=mod_forum_get_forum_discussio
                             + "&sortby=timemodified&sortdirection=DESC&wstoken={0}&forumid={1}&page={2}&perpage={3}"
 
 # Session based webpages
-SITE_DASHBOARD = "my/"
-SITE_COURSE = "course/view.php?id={0}"
+SITE_DASHBOARD = "/my/"
+SITE_COURSE = "/course/view.php?id={0}"
 
 BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
@@ -329,37 +329,40 @@ def unenroll_all(session_cookie):
         print("Invalid session cookie. Try again.")
         return
 
-    print("Unenrolling all courses")
-
     courses = get_enrolled_courses()
+    print(f"Unerolling from {len(courses)} courses")
     with ThreadPoolExecutor(max_workers=10) as executor:
         for course in courses:
-            executor.submit(unerol_course, course, cookies)
+            executor.submit(unenroll_course, course, cookies)
 
 
-def unerol_course(course, cookies):
+def unenroll_course(course, cookies):
     session = requests.Session()
     session.cookies = requests.cookies.cookiejar_from_dict(cookies)
     course_id = course["id"]
     r = session.post(WEB_SERVER + SITE_COURSE.format(course_id))
     soup = BeautifulSoup(r.content, features="lxml")
-    anchors = soup.find_all("a", href=re.compile("unenrolself.php"))
+    anchors = soup.find_all("a", href=re.compile(".*unenrolself.php"))
     if anchors:
         unenrol = anchors[0]["href"]
         r = session.post(unenrol)
         soup = BeautifulSoup(r.content, features="lxml")
-        form = soup.find("form", action="https://td.bits-hyderabad.ac.in/moodle/enrol/self/unenrolself.php")
+        form = soup.find("form", action=f"{WEB_SERVER}/enrol/self/unenrolself.php")
         if form:
             enrolid = form.find("input", {"name": "enrolid"})["value"]
             sesskey = form.find("input", {"name": "sesskey"})["value"]
 
             payload = {"enrolid": enrolid, "confirm": "1", "sesskey": sesskey}
-            r = session.post("https://td.bits-hyderabad.ac.in/moodle/enrol/self/unenrolself.php", data=payload)
-            if r.status_code == 200:
+            r = session.post(f"{WEB_SERVER}/enrol/self/unenrolself.php", data=payload)
+            if r.status_code >= 200 and r.status_code < 400:
                 print("Unenrolled from: ", course["fullname"])
             else:
-                print("Failed to unenroll from: ", course["fullname"])
+                print(f"Failed to unenroll from: {course['fullname']}... Final post failed")
+        else:
+            print(f"Failed to unenroll from: {course['fullname']}... Form not found")
 
+    else:
+        print(f"Failed to unenroll from: {course['fullname']}... No anchors found")
 
 def get_all_courses():
     response = requests.request("get", API_GET_ALL_COURSES.format(TOKEN))
