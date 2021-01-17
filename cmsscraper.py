@@ -37,6 +37,7 @@ API_GET_ALL_COURSES = API_BASE + "wsfunction=core_course_get_courses_by_field&mo
 API_ENROL_COURSE = API_BASE + "wsfunction=enrol_self_enrol_user&moodlewsrestformat=json&wstoken={0}&courseid={1}"
 API_GET_FORUM_DISCUSSIONS = API_BASE + "wsfunction=mod_forum_get_forum_discussions_paginated&moodlewsrestformat=json" \
                             + "&sortby=timemodified&sortdirection=DESC&wstoken={0}&forumid={1}&page={2}&perpage={3}"
+API_GET_COURSE_CATEGORIES = API_BASE + "wsfunction=core_course_get_categories&moodlewsrestformat=json&wstoken={0}"
 
 # Session based webpages
 SITE_DASHBOARD = "/my/"
@@ -50,6 +51,8 @@ user_id = 0
 
 download_queue = []
 
+course_categories = []
+
 
 def main():
 
@@ -57,13 +60,14 @@ def main():
     global user_id
     global BASE_DIR
     global COURSE_CATEGORY_NAME
+    global course_categories
 
     # setup CLI args
     parser = argparse.ArgumentParser(prog='cmsscrapy.py')
     parser.add_argument('token', help='Moodle WebServices token')
     parser.add_argument(
-        '--category', 
-        type=str, 
+        '--category',
+        type=str,
         help='The name of the category of which courses are downloaded from.',
         default=''
     )
@@ -108,6 +112,8 @@ def main():
         if args.unenroll_all and args.preserve:
             print("Cannot specify --unenroll-all and --preserve together")
             sys.exit()
+
+        course_categories = get_course_categories()
 
         if args.unenroll_all and not args.all and not args.handouts:
             # unenroll all courses and exit out
@@ -380,8 +386,20 @@ def get_all_courses():
 
 def get_enrolled_courses():
     response = requests.request("get", API_ENROLLED_COURSES.format(TOKEN, user_id))
-    return json.loads(response.text)
+    courses = json.loads(response.text)
+    if COURSE_CATEGORY_NAME:
+        category_id = 0
+        for category in course_categories:
+            if category["name"] == COURSE_CATEGORY_NAME:
+                category_id = category["id"]
+                break
+        courses = [x for x in courses if x["category"] and x["category"] == category_id]
+    return courses
 
+
+def get_course_categories():
+    response = requests.request("get", API_GET_COURSE_CATEGORIES.format(TOKEN))
+    return json.loads(response.text)
 
 def start_downloads():
     if not download_queue:
