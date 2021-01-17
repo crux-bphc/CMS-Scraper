@@ -17,14 +17,12 @@ WEB_SERVER = "https://cms.bits-hyderabad.ac.in"
 
 VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 
-# Set this to the course category name to fetch courses from a specific category.
-# Set to a falsy to ignore category names.
 # An example category is "Semester II 2019-20". There can be multiple cataegories
 # for example if one semester does not before another begins and there is a
 # reason to maintain courses from both semester. This was the case with Sem II of
 # 2019-20 and the Summer term (and possible Sem I 2020-21) due to the Covid-19
 # pandemic.
-COURSE_CATEGORY_NAME = "Semester I - 2020-21"
+COURSE_CATEGORY_NAME = ""
 
 COURSE_NAME_REGEX = r"^([\w\d \-'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
@@ -58,11 +56,17 @@ def main():
     global TOKEN
     global user_id
     global BASE_DIR
+    global COURSE_CATEGORY_NAME
 
     # setup CLI args
     parser = argparse.ArgumentParser(prog='cmsscrapy.py')
     parser.add_argument('token', help='Moodle WebServices token')
-
+    parser.add_argument(
+        '--category', 
+        type=str, 
+        help='The name of the category of which courses are downloaded from.',
+        default=''
+    )
     parser.add_argument('--destination', help='The destination to download files to')
     parser.add_argument('--session-cookie', help='Session cookie obtained after logging in through a browser')
     parser.add_argument('--unenroll-all', action='store_true', help='Uneroll from all courses. ' +
@@ -74,7 +78,9 @@ def main():
                         ' courses.')
 
     args = parser.parse_args()
+
     TOKEN = args.token
+    COURSE_CATEGORY_NAME = args.category
 
     if args.destination is not None:
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
