@@ -11,6 +11,8 @@ isort = "*"
 requests = "*"
 beautifulsoup4 = "*"
 lxml = "*"
+aiohttp = "*"
+mypy = "*"
 
 [requires]
 python_version = "3.6.9"
