@@ -1,16 +1,16 @@
 #! python3
 import argparse
-import concurrent.futures
+import asyncio
 import html
 import json
+import logging
+import logging.config
 import os
 import re
 import string
-import sys
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
 
 WEB_SERVER = "https://cms.bits-hyderabad.ac.in"
@@ -47,20 +47,25 @@ BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAM
 
 TOKEN = ""
 
+logger: logging.Logger = logging.getLogger()
+
 user_id = 0
 
 download_queue = []
 
 course_categories = []
 
+session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100))
 
-def main():
+
+async def main():
 
     global TOKEN
     global user_id
     global BASE_DIR
     global COURSE_CATEGORY_NAME
     global course_categories
+    global session
 
     # setup CLI args
     parser = argparse.ArgumentParser(prog='cmsscrapy.py')
@@ -90,226 +95,199 @@ def main():
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
                                 COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
+    response = await session.get(API_CHECK_TOKEN.format(TOKEN))
+    if not response.status == 200:
+        print("Bad response code while verifying token: " + str(response.status))
+        return
 
-    response = requests.request("get", API_CHECK_TOKEN.format(TOKEN))
-    if response.status_code == 200:
-        js = json.loads(response.text)
-        if "exception" in js and js["errorcode"] == "invalidtoken":
-            print("Couldn't verify token. Invalid token.")
+    js = json.loads(await response.text())
+    if 'exception' in js and js['errorcode'] == 'invalidtoken':
+        print("Couldn't verify token. Invalid token.")
+        return
 
-        user_id = js['userid']
-        os.makedirs(BASE_DIR, exist_ok=True)
+    user_id = js['userid']
+    os.makedirs(BASE_DIR, exist_ok=True)
 
-        if args.session_cookie is None:
-            if args.unenroll_all:
-                print("Cannot uneroll from courses without providing session cookie")
-                sys.exit()
+    if args.session_cookie is None:
+        if args.unenroll_all or args.preserve:
+            print("Cannot uneroll from courses without providing session cookie")
+            return
 
-            if args.preserve and args.all:
-                print("Cannot uneroll from courses without providing session cookie.")
-                sys.exit()
+    if args.unenroll_all and args.preserve:
+        print("Cannot specify --unenroll-all and --preserve together")
+        return
 
-        if args.unenroll_all and args.preserve:
-            print("Cannot specify --unenroll-all and --preserve together")
-            sys.exit()
+    session.cookie_jar.update_cookies({'MoodleSession': args.session_cookie})
 
-        course_categories = get_course_categories()
+    course_categories = await get_course_categories()
 
-        if args.unenroll_all and not args.all and not args.handouts:
-            # unenroll all courses and exit out
-            unenroll_all(args.session_cookie)
-        else:
-            if args.preserve:
-                enrolled_courses = get_enrolled_courses()
-
-            if args.all:
-                enrol_all_courses()
-
-            if args.handouts:
-                download_handouts()
-            else:
-                download_all()
-
-            if args.preserve and args.all:
-                unenroll_all(args.session_cookie)
-                enroll_courses(enrolled_courses)
+    if args.unenroll_all and not args.all and not args.handouts:
+        # unenroll all courses and exit out
+        await unenrol_all(args.session_cookie)
     else:
-        print("Bad response code while verifying token: " + str(response.status_code))
+        if args.preserve:
+            enrolled_courses = await get_enroled_courses()
+
+        if args.all:
+            await enrol_all_courses()
+
+        if args.handouts:
+            await download_handouts()
+        else:
+            await download_enroled_courses()
+
+        if args.preserve and args.all:
+            await unenrol_all(args.session_cookie)
+            await enrol_courses(enrolled_courses)
 
 
-def enrol_all_courses():
+async def enrol_all_courses():
     """Enroll a user to all courses listed on CMS"""
     print("Enrolling to all courses")
-    enroll_courses(get_all_courses())
+    enrol_courses(await get_all_courses())
 
 
-def enroll_courses(courses):
-    """Enroll to all specified courses"""
-    enrolled_courses = [x['id'] for x in get_enrolled_courses()]
-    to_enrol = [x for x in courses if not x["id"] in enrolled_courses]
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        executor.map(enrol_course, [x["id"] for x in to_enrol], [x["fullname"] for x in to_enrol])
-        executor.shutdown(wait=True)
+async def enrol_courses(courses: dict):
+    """Enrol to all specified courses"""
+    enroled_courses = [x['id'] for x in await get_enroled_courses()]
+    to_enrol = [x for x in courses if x["id"] not in enroled_courses]
+    futures = [enrol_course(x, x['fullname']) for x in to_enrol]
+    await asyncio.gather(*futures)
 
 
-def enrol_course(id, fullname):
-    requests.request("get", API_ENROL_COURSE.format(TOKEN, id))
-    print("Enrolled in course: " + html.unescape(fullname))
+async def enrol_course(id: int, fullname: str):
+    logger.info(f'Enroling to course: {html.unescape(fullname)}')
+    await session.get(API_ENROL_COURSE.format(TOKEN, id))
 
 
-def download_all():
-    directories = enquee_all_downloads()
-    print("Starting downloads")
-    if download_queue:
-        start_downloads()
-    else:
-        print("Nothing to download!")
-
-    # delete all empty diretories
-    for d in reversed(directories):
-        if os.path.exists(d) and len(os.listdir(d)) == 0:
-            os.rmdir(d)
-
-
-def enquee_all_downloads():
-    # pre-compile the regex expression
+async def download_enroled_courses():
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
     regex = re.compile(COURSE_NAME_REGEX)
 
     # get the list of enrolled courses
-    courses = get_enrolled_courses()
+    courses = await get_enroled_courses()
 
-    # holds the list of directories created... all empty directories will be deleted as part of cleanup
-    directories = []
+    async def process(course, course_name, section_name):
+        logger.info(f'Processing course {course_name} {section_name}')
+        course_name = removeDisallowedFilenameChars(course_name)
+        course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
-    print("Enqueueing downloads")
+        # create folders
+        os.makedirs(course_dir, exist_ok=True)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = []
-        for course in courses:
-            match = regex.match(html.unescape(course["fullname"]))
-            if not match:
-                continue
-            futures.append(executor.submit(enquee_course_downloads, course, match[1], match[2]))
+        course_id = course["id"]
+        # TODO: Create method to get course contents
+        response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
+        course_sections = json.loads(await response.text())
 
-        for future in concurrent.futures.as_completed(futures):
-            result = future.result()
-            print("Finished processing: " + ", ".join((result[0], result[1], result[4] if len(result) == 5 else "")))
-            directories.extend(result[2])
+        futures = [download_course_section(x, course_dir) for x in course_sections]
+        await asyncio.gather(*futures)
 
-    return directories
-
-
-def enquee_course_downloads(course, course_name, section_name):
-    directories = []
-
-    course_name = removeDisallowedFilenameChars(course_name)
-    course_dir = os.path.join(BASE_DIR, course_name, section_name)
-
-    # create folders
-    os.makedirs(course_dir, exist_ok=True)
-    directories.append(course_dir)
-
-    course_id = course["id"]
-    response = requests.request("get", API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
-    course_sections = json.loads(response.text)
-    for course_section in course_sections:
-        # create folder with name of the course_section
-        course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
-        course_section_dir = os.path.join(course_dir, course_section_name)
-        os.makedirs(course_section_dir, exist_ok=True)
-        directories.append(course_section_dir)
-
-        # Sometimes professors use section descriptions as announcements and embed file links
-        summary = course_section["summary"]
-        if summary:
-            soup = BeautifulSoup(summary, features="lxml")
-            anchors = soup.find_all('a')
-            if anchors:
-                for anchor in anchors:
-                    link = anchor.get('href')
-                    if link:
-                        if WEB_SERVER in link:
-                            # file is on the same domain, download it
-                            # we don't know the file name, we use w/e is provided by the server
-                            submit_download(get_final_download_link(link, TOKEN), course_section_dir, None)
-
-        if "modules" not in course_section:
+    futures = []
+    for course in courses:
+        match = regex.match(html.unescape(course["fullname"]))
+        if not match:
             continue
-
-        for module in course_section["modules"]:
-            # if it's a forum, there will be discussions which each need a folder
-            module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
-            module_dir = os.path.join(course_section_dir, module_name)
-            os.makedirs(module_dir, exist_ok=True)
-            directories.append(module_dir)
-
-            if module["modname"] in ("resource", "folder"):
-                for content in module["contents"]:
-                    file_url = content["fileurl"]
-                    file_url = get_final_download_link(file_url, TOKEN)
-                    if module["name"].lower() == "handout":
-                        # if the module is for handout, save the file as HANDOUT followed by the file extension
-                        file_name = "".join(("HANDOUT", content["filename"][content["filename"].rfind("."):]))
-                    else:
-                        file_name = removeDisallowedFilenameChars(content["filename"])
-
-                    out_path = os.path.join(module_dir, file_name)
-                    if os.path.exists(out_path) and os.path.getsize(out_path) == int(content["filesize"]):
-                        continue  # skip if we've already downloaded
-                    submit_download(file_url, module_dir, file_name)
-            elif module["modname"] == "forum":
-                forum_id = module["instance"]
-                # (0, 0) -> Returns all discussion
-                response = requests.request("get", API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
-                response_json = json.loads(response.text)
-                if "exception" in response_json:
-                    break   # probably no discussion associated with module
-
-                forum_discussions = json.loads(response.text)["discussions"]
-                for forum_discussion in forum_discussions:
-                    forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
-                    forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
-                    os.makedirs(forum_discussion_dir, exist_ok=True)
-                    directories.append(forum_discussion_dir)
-
-                    if not forum_discussion["attachment"] == "":
-                        for attachment in forum_discussion["attachments"]:
-                            file_url = attachment["fileurl"]
-                            file_url = get_final_download_link(file_url, TOKEN)
-                            out_path = os.path.join(forum_discussion_dir,
-                                                    removeDisallowedFilenameChars(attachment["filename"]))
-
-                            if os.path.exists(out_path) and os.path.getsize(out_path) == int(attachment["filesize"]):
-                                continue  # skip if we've already downloaded
-                            submit_download(file_url, forum_discussion_dir,
-                                            removeDisallowedFilenameChars(attachment["filename"]))
-    return (course_name, section_name, directories)
+        futures.append(process(course, match[1], match[2]))
+    await asyncio.gather(*futures)
 
 
-def download_handouts():
+async def download_course_section(course_section: dict, course_dir: str):
+    # create folder with name of the course_section
+    course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
+    course_section_dir = os.path.join(course_dir, course_section_name)
+    os.makedirs(course_section_dir, exist_ok=True)
+
+    futures = []
+
+    # Sometimes professors use section descriptions as announcements and embed file links
+    summary = course_section["summary"]
+    if summary:
+        soup = BeautifulSoup(summary, features="lxml")
+        anchors = soup.find_all('a')
+        if not anchors:
+            return
+        for anchor in anchors:
+            link = anchor.get('href')
+            # Download the file only if it's on the same domain
+            if not link or WEB_SERVER not in link:
+                continue
+            # we don't know the file name, we use w/e is provided by the server
+            download_link = get_final_download_link(link, TOKEN)
+            futures.append(download_file(download_link, course_section_dir, ""))
+
+    if "modules" not in course_section:
+        return
+
+    for module in course_section["modules"]:
+        futures.append(download_module(module, course_section_dir))
+    await asyncio.gather(*futures)
+
+
+async def download_module(module: dict, course_section_dir: str):
+    # if it's a forum, there will be discussions each of which need a folder
+    module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
+    module_dir = os.path.join(course_section_dir, module_name)
+    os.makedirs(module_dir, exist_ok=True)
+
+    futures = []
+    if module["modname"].lower() in ("resource", "folder"):
+        for content in module["contents"]:
+            file_url = content["fileurl"]
+            file_url = get_final_download_link(file_url, TOKEN)
+            if module["name"].lower() == "handout":
+                # rename handouts to HANDOUT
+                file_name = "".join(("HANDOUT", content["filename"][content["filename"].rfind("."):]))
+            else:
+                file_name = removeDisallowedFilenameChars(content["filename"])
+
+            futures.append(download_file(file_url, module_dir, file_name))
+    elif module["modname"] == "forum":
+        forum_id = module["instance"]
+        # (0, 0) -> Returns all discussion
+        response = await session.get(API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
+        if not response.ok:
+            logger.warning(f'Server responded with {response.status} for {response.real_url}... Retrying')
+            # Schedule this coroutine to run once again
+            asyncio.ensure_future(download_module(module, course_section_dir))
+            return
+        response_json = json.loads(await response.text())
+        if "exception" in response_json:
+            return   # probably no discussion associated with module
+
+        forum_discussions = response_json["discussions"]
+        for forum_discussion in forum_discussions:
+            forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
+            forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
+            os.makedirs(forum_discussion_dir, exist_ok=True)
+
+            if not forum_discussion["attachment"] == "":
+                for attachment in forum_discussion["attachments"]:
+                    file_url = get_final_download_link(attachment["fileurl"], TOKEN)
+                    file_name = removeDisallowedFilenameChars(attachment["filename"])
+                    futures.append(download_file(file_url, forum_discussion_dir, file_name))
+    await asyncio.gather(*futures)
+
+
+async def download_handouts():
     """Downloads handouts for all courses whose names matches the regex"""
-
-    # pre-compile the regex expression
-    # the first regex group represents the course code and the name of the course
-    # the second regex group represents only the course code
     regex = re.compile(COURSE_NAME_REGEX)
 
     print("Downloading handouts")
 
     # get the list of enrolled courses
-    response = requests.request("get", API_ENROLLED_COURSES.format(TOKEN, user_id))
+    response = await session.get(API_ENROLLED_COURSES.format(TOKEN, user_id))
+    courses = json.loads(await response.text())
 
-    courses = json.loads(response.text)
-    for course in courses:
+    async def process(course):
         full_name = html.unescape(course["fullname"]).strip()
         match = regex.match(full_name)
         if not match:
-            continue
-        print("Processing:", full_name)
+            return
+        logger.info(f"Processing: {full_name}")
         course_id = course["id"]
-        response = requests.request("get", API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
-        course_sections = json.loads(response.text)
+        response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
+        course_sections = json.loads(await response.text())
         for course_section in course_sections:
             for module in course_section["modules"]:
                 if module["name"].lower().strip() == "handout":
@@ -320,155 +298,192 @@ def download_handouts():
                         file_ext = content["filename"][content["filename"].rfind("."):]
 
                         short_name = removeDisallowedFilenameChars(match[1].strip()) + "_HANDOUT"
-                        print(short_name)
-                        if submit_download(file_url, BASE_DIR, short_name, file_ext=file_ext):
-                            break
+                        print("Downloading:", short_name)
+                        await download_file(file_url, BASE_DIR, short_name, file_ext=file_ext)
             else:
                 continue
             break
-    start_downloads()
+
+    await asyncio.gather(*[process(x) for x in courses])
 
 
-def unenroll_all(session_cookie):
-    # Get and set the session cookie
-    cookies = {'MoodleSession': session_cookie}
-
+async def unenrol_all():
     # Check if session is valid
-    session = requests.Session()
-    session.cookies = requests.cookies.cookiejar_from_dict(cookies)
-    r = session.post(WEB_SERVER + SITE_DASHBOARD)
-    if r.status_code == 303:
-        print("Invalid session cookie. Try again.")
+    response: aiohttp.ClientResponse = await session.post(WEB_SERVER + SITE_DASHBOARD)
+    if response.status == 303:
+        logger.error('Invalid session cookie')
         return
 
-    courses = get_enrolled_courses()
-    print(f"Unerolling from {len(courses)} courses")
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        for course in courses:
-            executor.submit(unenroll_course, course, cookies)
+    courses = await get_enroled_courses()
+    logger.info(f'Unerolling from {len(courses)} courses')
+
+    futures = [unenrol_course(x) for x in courses]
+    asyncio.gather(futures)
 
 
-def unenroll_course(course, cookies):
-    session = requests.Session()
-    session.cookies = requests.cookies.cookiejar_from_dict(cookies)
+async def unenrol_course(course: dict, retry_count: int = 0):
     course_id = course["id"]
-    r = session.post(WEB_SERVER + SITE_COURSE.format(course_id))
+
+    r = await session.post(WEB_SERVER + SITE_COURSE.format(course_id))
+    if not r.ok:
+        if retry_count >= 10:
+            logger.failed(f'Failed to unenrol from {course["fullname"]}, exceeded retries')
+            return
+        asyncio.ensure_future(unenrol_course(course, retry_count+1))
+        return
+
+    soup = BeautifulSoup(await r.text(), features='lxml')
+    anchors = soup.find_all('a', href=re.compile('.*unenrolself.php'))
+    if not anchors:
+        print(f'Failed to unenroll from: {course["fullname"]}... No anchors found')
+        asyncio.ensure_future(unenrol_course(course, retry_count+1))
+        return
+
+    unenrol_link = anchors[0]['href']
+    r = session.post(unenrol_link)
+    if not r.ok:
+        if retry_count >= 10:
+            logger.error(f'Failed to unenrol from {course["fullname"]}, exceeded retries')
+            return
+        asyncio.ensure_future(unenrol_course(course, retry_count+1))
+        return
+
     soup = BeautifulSoup(r.content, features="lxml")
-    anchors = soup.find_all("a", href=re.compile(".*unenrolself.php"))
-    if anchors:
-        unenrol = anchors[0]["href"]
-        r = session.post(unenrol)
-        soup = BeautifulSoup(r.content, features="lxml")
-        form = soup.find("form", action=f"{WEB_SERVER}/enrol/self/unenrolself.php")
-        if form:
-            enrolid = form.find("input", {"name": "enrolid"})["value"]
-            sesskey = form.find("input", {"name": "sesskey"})["value"]
+    form = soup.find('form', action=f'{WEB_SERVER}/enrol/self/unenrolself.php')
+    if not form:
+        logger.error(f'Failed to unenroll from: {course["fullname"]}... Form not found')
+        asyncio.ensure_future(unenrol_course(course, retry_count+1))
+        return
 
-            payload = {"enrolid": enrolid, "confirm": "1", "sesskey": sesskey}
-            r = session.post(f"{WEB_SERVER}/enrol/self/unenrolself.php", data=payload)
-            if r.status_code >= 200 and r.status_code < 400:
-                print("Unenrolled from: ", course["fullname"])
-            else:
-                print(f"Failed to unenroll from: {course['fullname']}... Final post failed")
-        else:
-            print(f"Failed to unenroll from: {course['fullname']}... Form not found")
+    enrolid = form.find('input', {'name': 'enrolid'})['value']
+    sesskey = form.find('input', {'name': 'sesskey'})['value']
 
+    payload = {'enrolid': enrolid, 'confirm': '1', 'sesskey': sesskey}
+    r = session.post(f'{WEB_SERVER}/enrol/self/unenrolself.php', data=payload)
+    if r.status_code >= 200 and r.status_code < 400:
+        logger.info('Unenrolled from: ', course['fullname'])
     else:
-        print(f"Failed to unenroll from: {course['fullname']}... No anchors found")
+        logger.error(f'Failed to unenroll from: {course["fullname"]}... Final post failed')
+        asyncio.ensure_future(unenrol_course(course, retry_count+1))
 
-def get_all_courses():
-    response = requests.request("get", API_GET_ALL_COURSES.format(TOKEN))
-    courses = json.loads(response.text)["courses"]
+
+async def get_all_courses() -> dict:
+    response = await session.get(API_GET_ALL_COURSES.format(TOKEN))
+    courses = json.loads(await response.text)["courses"]
     if COURSE_CATEGORY_NAME:
         courses = [x for x in courses if x["categoryname"] == COURSE_CATEGORY_NAME]
     return courses
 
 
-def get_enrolled_courses():
-    response = requests.request("get", API_ENROLLED_COURSES.format(TOKEN, user_id))
-    courses = json.loads(response.text)
+async def get_enroled_courses() -> dict:
+    response = await session.get(API_ENROLLED_COURSES.format(TOKEN, user_id))
+    courses = json.loads(await response.text())
     if COURSE_CATEGORY_NAME:
-        category_id = 0
-        for category in course_categories:
-            if category["name"] == COURSE_CATEGORY_NAME:
-                category_id = category["id"]
-                break
+        category_id = get_category_id_from_name(COURSE_CATEGORY_NAME)
         courses = [x for x in courses if x["category"] and x["category"] == category_id]
     return courses
 
 
-def get_course_categories():
-    response = requests.request("get", API_GET_COURSE_CATEGORIES.format(TOKEN))
-    return json.loads(response.text)
-
-def start_downloads():
-    if not download_queue:
-        print("Nothing queued for download")
-        return
-
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = []
-        for item in download_queue:
-            futures.append(executor.submit(download_file, *item))
-
-        for future in concurrent.futures.as_completed(futures):
-            ret = future.result()
-            if ret:
-                print("Downloaded file:", ret[1])
+async def get_course_categories() -> dict:
+    response = await session.get(API_GET_COURSE_CATEGORIES.format(TOKEN))
+    return json.loads(await response.text())
 
 
-def submit_download(file_url, file_dir, file_name, file_ext=""):
-    download_queue.append((file_url, file_dir, file_name, file_ext))
+async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: str = "") -> bool:
+    """Download file asynchronously
 
+    if `file_name` is empty, file name will be obtained from the
+    `Content-Disposition` header of the response. If this is empty as well,
+    the file is not downloaded.
 
-def download_file(file_url, file_dir, file_name, file_ext=""):
-    """Downloads the file at file_url and saves at the file_name. If file_ext is apened to end of file_name"""
-    with requests.get(file_url, stream=True) as response:
-        check_exists = False
+    If the download fails for whatever reason, it is requeed.
+    """
+    async with session.get(file_url, chunked=10*1024*1024) as response:
+        response: aiohttp.ClientResponse
+        if not response.ok:
+            # schedule a retry of this download
+            logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Retrying')
+            asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
+            return
+
         if not file_name:
-            if not 'content-disposition' in response.headers:
-                return # No name, no content-disposition, skip
+            if 'content-disposition' not in response.headers:
+                logger.error(f'Cannot download {file_url}... Empty file name and content disposititon')
+                return False
             file_name = response.headers['content-disposition']
             file_name = re.findall("filename=\"(.+)\"", file_name)[0]
-            check_exists = True  # since file name was not known when enqueeing, we check if file exists here
 
         path = os.path.join(file_dir, file_name + file_ext)
 
-        # if int(response.headers['content-length']) > 100 * 1024 * 1024:
-        #     # skip files greater than 100 MB and a blacklisted extension
-        #     t = [x not in path for x in ('.mp4', '.mov', '.rar')]
-        #     if not all(t):
-        #         return
-
         # Ignore if file already exists
-        if check_exists and os.path.exists(path) and os.path.getsize(path) == int(response.headers['content-length']):
-            return
+        length = int(response.headers['content-length'])
+        humanized_length = humanized_sizeof(length)
+        if os.path.exists(path) and os.path.getsize(path) == length:
+            return False
 
-        print("Downloading file:", file_url,
-              "Length=%s" % human_readable_sizeof_fmt(int(response.headers['content-length'])))
+        logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
 
         with open(path, "wb+") as f:
-            for chunk in response.iter_content(100*1024*1024):
+            async for chunk in response.content.iter_chunked(10*1024*1024):
                 f.write(chunk)
-        return (True, path)
+        return True
+
+
+def get_category_id_from_name(category_name: str) -> int:
+    for category in course_categories:
+        if category["name"] == category_name:
+            return category["id"]
+
 
 def get_final_download_link(file_url, token):
     token_parameter = "".join(("&token=", TOKEN) if "?" in file_url else ("?token=", TOKEN))
     return "".join((file_url, token_parameter))
 
 
-def human_readable_sizeof_fmt(num, suffix='B'):
-    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
+def humanized_sizeof(num: int, unit: str = 'B') -> str:
+    """Convert `num` from base `unit` to human readable base-2 size string
+
+    num: Size in bytes
+    suffix: Unit suffix, default 'B' for bytes
+    """
+    for prefix in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
         if abs(num) < 1024.0:
-            return "%3.1f%s%s" % (num, unit, suffix)
+            return "%3.1f%s%s" % (num, prefix, unit)
         num /= 1024.0
-    return "%.1f%s%s" % (num, 'Yi', suffix)
+    return "%.1f%s%s" % (num, 'Yi', unit)
 
 
-def removeDisallowedFilenameChars(filename):
+def removeDisallowedFilenameChars(filename: str) -> str:
+    """Remove disallowed characters from given filename"""
     cleanedFilename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore')
     return ''.join(chr(c) for c in cleanedFilename if chr(c) in VALID_FILENAME_CHARS)
 
 
 if __name__ == "__main__":
-    main()
+    LOG_CONF = {
+        'version': 1,
+        'formatters': {
+            'simple': {
+                'format': '%(asctime)s - %(levelname)s - %(message)s'
+            }
+        },
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'level': 'DEBUG',
+                'formatter': 'simple',
+                'stream': 'ext://sys.stdout',
+            },
+        },
+        'loggers': {
+            '': {
+                'level': 'DEBUG',
+                'handlers': ['console', ]
+            }
+        }
+    }
+    logging.config.dictConfig(LOG_CONF)
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
+    loop.run_until_complete(session.close())
