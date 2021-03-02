@@ -97,12 +97,12 @@ async def main():
 
     response = await session.get(API_CHECK_TOKEN.format(TOKEN))
     if not response.status == 200:
-        print("Bad response code while verifying token: " + str(response.status))
+        logger.error("Bad response code while verifying token: " + str(response.status))
         return
 
     js = json.loads(await response.text())
     if 'exception' in js and js['errorcode'] == 'invalidtoken':
-        print("Couldn't verify token. Invalid token.")
+        logger.error("Couldn't verify token. Invalid token.")
         return
 
     user_id = js['userid']
@@ -110,11 +110,11 @@ async def main():
 
     if args.session_cookie is None:
         if args.unenroll_all or args.preserve:
-            print("Cannot uneroll from courses without providing session cookie")
+            logger.error("Cannot uneroll from courses without providing session cookie")
             return
 
     if args.unenroll_all and args.preserve:
-        print("Cannot specify --unenroll-all and --preserve together")
+        logger.error("Cannot specify --unenroll-all and --preserve together")
         return
 
     session.cookie_jar.update_cookies({'MoodleSession': args.session_cookie})
@@ -143,7 +143,7 @@ async def main():
 
 async def enrol_all_courses():
     """Enroll a user to all courses listed on CMS"""
-    print("Enrolling to all courses")
+    logger.info("Enrolling to all courses")
     await enrol_courses(await get_all_courses())
 
 
@@ -273,7 +273,7 @@ async def download_handouts():
     """Downloads handouts for all courses whose names matches the regex"""
     regex = re.compile(COURSE_NAME_REGEX)
 
-    print("Downloading handouts")
+    logger.info("Downloading handouts")
 
     # get the list of enrolled courses
     response = await session.get(API_ENROLLED_COURSES.format(TOKEN, user_id))
@@ -298,7 +298,7 @@ async def download_handouts():
                         file_ext = content["filename"][content["filename"].rfind("."):]
 
                         short_name = removeDisallowedFilenameChars(match[1].strip()) + "_HANDOUT"
-                        print("Downloading:", short_name)
+                        logger.info("Downloading:", short_name)
                         await download_file(file_url, BASE_DIR, short_name, file_ext=file_ext)
             else:
                 continue
@@ -335,7 +335,7 @@ async def unenrol_course(course: dict, retry_count: int = 0):
     soup = BeautifulSoup(await r.text(), features='lxml')
     anchors = soup.find_all('a', href=re.compile('.*unenrolself.php'))
     if not anchors:
-        print(f'Failed to unenroll from: {course["fullname"]}... No anchors found')
+        logger.warning(f'Failed to unenroll from: {course["fullname"]}... No anchors found')
         asyncio.ensure_future(unenrol_course(course, retry_count+1))
         return
 
