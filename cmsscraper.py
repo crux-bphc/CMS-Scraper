@@ -144,7 +144,7 @@ async def main():
 async def enrol_all_courses():
     """Enroll a user to all courses listed on CMS"""
     print("Enrolling to all courses")
-    enrol_courses(await get_all_courses())
+    await enrol_courses(await get_all_courses())
 
 
 async def enrol_courses(courses: dict):
@@ -369,7 +369,7 @@ async def unenrol_course(course: dict, retry_count: int = 0):
 
 async def get_all_courses() -> dict:
     response = await session.get(API_GET_ALL_COURSES.format(TOKEN))
-    courses = json.loads(await response.text)["courses"]
+    courses = json.loads(await response.text())["courses"]
     if COURSE_CATEGORY_NAME:
         courses = [x for x in courses if x["categoryname"] == COURSE_CATEGORY_NAME]
     return courses
