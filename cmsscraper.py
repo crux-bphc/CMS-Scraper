@@ -151,7 +151,7 @@ async def enrol_courses(courses: dict):
     """Enrol to all specified courses"""
     enroled_courses = [x['id'] for x in await get_enroled_courses()]
     to_enrol = [x for x in courses if x["id"] not in enroled_courses]
-    futures = [enrol_course(x, x['fullname']) for x in to_enrol]
+    futures = [enrol_course(x['id'], x['fullname']) for x in to_enrol]
     await asyncio.gather(*futures)
 
 
