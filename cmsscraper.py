@@ -402,9 +402,7 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
         async with session.get(file_url, chunked=1024) as response:
             response: aiohttp.ClientResponse
             if not response.ok:
-                # schedule a retry of this download
-                logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Retrying')
-                asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
+                logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Skipping')
                 return
 
             if not file_name:
