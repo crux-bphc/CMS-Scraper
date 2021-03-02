@@ -398,35 +398,38 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
 
     If the download fails for whatever reason, it is requeed.
     """
-    async with session.get(file_url, chunked=10*1024*1024) as response:
-        response: aiohttp.ClientResponse
-        if not response.ok:
-            # schedule a retry of this download
-            logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Retrying')
-            asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
-            return
+    try:
+        async with session.get(file_url, chunked=1024) as response:
+            response: aiohttp.ClientResponse
+            if not response.ok:
+                # schedule a retry of this download
+                logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Retrying')
+                asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
+                return
 
-        if not file_name:
-            if 'content-disposition' not in response.headers:
-                logger.error(f'Cannot download {file_url}... Empty file name and content disposititon')
+            if not file_name:
+                if 'content-disposition' not in response.headers:
+                    logger.error(f'Cannot download {file_url}... Empty file name and content disposititon')
+                    return False
+                file_name = response.headers['content-disposition']
+                file_name = re.findall("filename=\"(.+)\"", file_name)[0]
+
+            path = os.path.join(file_dir, file_name + file_ext)
+
+            # Ignore if file already exists
+            length = int(response.headers['content-length'])
+            humanized_length = humanized_sizeof(length)
+            if os.path.exists(path) and os.path.getsize(path) == length:
                 return False
-            file_name = response.headers['content-disposition']
-            file_name = re.findall("filename=\"(.+)\"", file_name)[0]
 
-        path = os.path.join(file_dir, file_name + file_ext)
+            logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
 
-        # Ignore if file already exists
-        length = int(response.headers['content-length'])
-        humanized_length = humanized_sizeof(length)
-        if os.path.exists(path) and os.path.getsize(path) == length:
-            return False
-
-        logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
-
-        with open(path, "wb+") as f:
-            async for chunk in response.content.iter_chunked(10*1024*1024):
-                f.write(chunk)
-        return True
+            with open(path, "wb+") as f:
+                async for chunk in response.content.iter_chunked(1024):
+                    f.write(chunk)
+            return True
+    except asyncio.TimeoutError:
+        asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
 
 
 def get_category_id_from_name(category_name: str) -> int:
