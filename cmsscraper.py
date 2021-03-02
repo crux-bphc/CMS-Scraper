@@ -406,11 +406,10 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
                 return
 
             if not file_name:
-                if 'content-disposition' not in response.headers:
+                if not response.content_disposition:
                     logger.error(f'Cannot download {file_url}... Empty file name and content disposititon')
                     return False
-                file_name = response.headers['content-disposition']
-                file_name = re.findall("filename=\"(.+)\"", file_name)[0]
+                file_name = response.content_disposition.filename
 
             path = os.path.join(file_dir, file_name + file_ext)
 
