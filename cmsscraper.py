@@ -95,6 +95,7 @@ async def main():
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
                                 COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
+    logger.info("Verifying Token")
     response = await session.get(API_CHECK_TOKEN.format(TOKEN))
     if not response.status == 200:
         logger.error("Bad response code while verifying token: " + str(response.status))
@@ -135,6 +136,10 @@ async def main():
             await download_handouts()
         else:
             await download_enroled_courses()
+
+        # Await all pending downloads that were submitted
+        pending = asyncio.Task.all_tasks()
+        await asyncio.gather(*pending)
 
         if args.preserve and args.all:
             await unenrol_all(args.session_cookie)
@@ -180,16 +185,14 @@ async def download_enroled_courses():
         response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
         course_sections = json.loads(await response.text())
 
-        futures = [download_course_section(x, course_dir) for x in course_sections]
-        await asyncio.gather(*futures)
+        for x in course_sections:
+            asyncio.ensure_future(download_course_section(x, course_dir))
 
-    futures = []
     for course in courses:
         match = regex.match(html.unescape(course["fullname"]))
         if not match:
             continue
-        futures.append(process(course, match[1], match[2]))
-    await asyncio.gather(*futures)
+        asyncio.ensure_future(process(course, match[1], match[2]))
 
 
 async def download_course_section(course_section: dict, course_dir: str):
@@ -197,8 +200,6 @@ async def download_course_section(course_section: dict, course_dir: str):
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
     course_section_dir = os.path.join(course_dir, course_section_name)
     os.makedirs(course_section_dir, exist_ok=True)
-
-    futures = []
 
     # Sometimes professors use section descriptions as announcements and embed file links
     summary = course_section["summary"]
@@ -214,14 +215,13 @@ async def download_course_section(course_section: dict, course_dir: str):
                 continue
             # we don't know the file name, we use w/e is provided by the server
             download_link = get_final_download_link(link, TOKEN)
-            futures.append(download_file(download_link, course_section_dir, ""))
+            asyncio.ensure_future(download_file(download_link, course_section_dir, ""))
 
     if "modules" not in course_section:
         return
 
     for module in course_section["modules"]:
-        futures.append(download_module(module, course_section_dir))
-    await asyncio.gather(*futures)
+        asyncio.ensure_future(download_module(module, course_section_dir))
 
 
 async def download_module(module: dict, course_section_dir: str):
@@ -230,7 +230,6 @@ async def download_module(module: dict, course_section_dir: str):
     module_dir = os.path.join(course_section_dir, module_name)
     os.makedirs(module_dir, exist_ok=True)
 
-    futures = []
     if module["modname"].lower() in ("resource", "folder"):
         for content in module["contents"]:
             file_url = content["fileurl"]
@@ -241,7 +240,7 @@ async def download_module(module: dict, course_section_dir: str):
             else:
                 file_name = removeDisallowedFilenameChars(content["filename"])
 
-            futures.append(download_file(file_url, module_dir, file_name))
+            asyncio.ensure_future(download_file(file_url, module_dir, file_name))
     elif module["modname"] == "forum":
         forum_id = module["instance"]
         # (0, 0) -> Returns all discussion
@@ -265,8 +264,7 @@ async def download_module(module: dict, course_section_dir: str):
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
-                    futures.append(download_file(file_url, forum_discussion_dir, file_name))
-    await asyncio.gather(*futures)
+                    asyncio.ensure_future(download_file(file_url, forum_discussion_dir, file_name))
 
 
 async def download_handouts():
