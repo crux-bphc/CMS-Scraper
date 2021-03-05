@@ -417,6 +417,10 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
             if os.path.exists(path) and os.path.getsize(path) == length:
                 return False
 
+            if length >= 512 * 1024 * 1024:
+                logger.info(f'Skipping file: {file_url}, Length exceeds 500MiB')
+                return False
+
             logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
 
             with open(path, "wb+") as f:
