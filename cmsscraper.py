@@ -86,6 +86,8 @@ async def main():
     parser.add_argument('--preserve', action='store_true', help='Preserves the courses you are enrolled to. ' +
                         ' If the --all flag is specified, then you must provide a session cookie to unenroll from ' +
                         ' courses.')
+    parser.add_argument('--restore', action='store_true', help='Restores previously preserved courses. To be used after'
+                        ' unenrolling from all courses.')
 
     args = parser.parse_args()
 
@@ -111,7 +113,7 @@ async def main():
     await async_makedirs(BASE_DIR)
 
     if args.session_cookie is None:
-        if args.unenroll_all or args.preserve:
+        if args.unenroll_all:
             logger.error("Cannot uneroll from courses without providing session cookie")
             return
 
@@ -129,6 +131,13 @@ async def main():
     else:
         if args.preserve:
             enrolled_courses = await get_enroled_courses()
+            with open('preserved.json', 'w') as f:
+                json.dump(enrolled_courses, f)
+
+        if args.restore:
+            with open('preserved.json', 'r') as f:
+                to_enrol = json.load(f)
+                enrol_courses(to_enrol)
 
         if args.all:
             await enrol_all_courses()
