@@ -9,6 +9,7 @@ import os
 import re
 import string
 import unicodedata
+from functools import partial
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -107,7 +108,7 @@ async def main():
         return
 
     user_id = js['userid']
-    os.makedirs(BASE_DIR, exist_ok=True)
+    await async_makedirs(BASE_DIR)
 
     if args.session_cookie is None:
         if args.unenroll_all or args.preserve:
@@ -178,7 +179,7 @@ async def download_enroled_courses():
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
         # create folders
-        os.makedirs(course_dir, exist_ok=True)
+        await async_makedirs(course_dir)
 
         course_id = course["id"]
         # TODO: Create method to get course contents
@@ -199,7 +200,7 @@ async def download_course_section(course_section: dict, course_dir: str):
     # create folder with name of the course_section
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
     course_section_dir = os.path.join(course_dir, course_section_name)
-    os.makedirs(course_section_dir, exist_ok=True)
+    await async_makedirs(course_section_dir)
 
     # Sometimes professors use section descriptions as announcements and embed file links
     summary = course_section["summary"]
@@ -228,7 +229,7 @@ async def download_module(module: dict, course_section_dir: str):
     # if it's a forum, there will be discussions each of which need a folder
     module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
     module_dir = os.path.join(course_section_dir, module_name)
-    os.makedirs(module_dir, exist_ok=True)
+    await async_makedirs(module_dir)
 
     if module["modname"].lower() in ("resource", "folder"):
         for content in module["contents"]:
@@ -258,7 +259,7 @@ async def download_module(module: dict, course_section_dir: str):
         for forum_discussion in forum_discussions:
             forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
             forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
-            os.makedirs(forum_discussion_dir, exist_ok=True)
+            await async_makedirs(forum_discussion_dir)
 
             if not forum_discussion["attachment"] == "":
                 for attachment in forum_discussion["attachments"]:
@@ -429,6 +430,12 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
             return True
     except asyncio.TimeoutError:
         asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
+
+
+async def async_makedirs(path, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    pfunc = partial(os.makedirs, path, *args, **kwargs, exist_ok=True)
+    return await loop.run_in_executor(None, pfunc)
 
 
 def get_category_id_from_name(category_name: str) -> int:
