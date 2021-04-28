@@ -56,7 +56,9 @@ download_queue = []
 
 course_categories = []
 
-session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100))
+session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector())
+
+download_queue = []
 
 
 async def main():
@@ -143,13 +145,15 @@ async def main():
             await enrol_all_courses()
 
         if args.handouts:
-            await download_handouts()
+            await queue_handouts()
         else:
-            await download_enroled_courses()
+            await queue_enroled_courses()
 
-        # Await all pending downloads that were submitted
-        pending = asyncio.Task.all_tasks()
-        await asyncio.gather(*pending)
+        if download_queue:
+            logger.info(f"Downloading {len(download_queue)} files...")
+            await process_download_queue()
+        else:
+            logger.info("No files to download!")
 
         if args.preserve and args.all:
             await unenrol_all(args.session_cookie)
@@ -164,25 +168,28 @@ async def enrol_all_courses():
 
 async def enrol_courses(courses: dict):
     """Enrol to all specified courses"""
+    sem = asyncio.Semaphore(100)
     enroled_courses = [x['id'] for x in await get_enroled_courses()]
     to_enrol = [x for x in courses if x["id"] not in enroled_courses]
-    futures = [enrol_course(x['id'], x['fullname']) for x in to_enrol]
+    futures = [enrol_course(sem, x['id'], x['fullname']) for x in to_enrol]
     await asyncio.gather(*futures)
 
 
-async def enrol_course(id: int, fullname: str):
+async def enrol_course(sem: asyncio.Semaphore, id: int, fullname: str):
     logger.info(f'Enroling to course: {html.unescape(fullname)}')
-    await session.get(API_ENROL_COURSE.format(TOKEN, id))
+    async with sem:
+        await session.get(API_ENROL_COURSE.format(TOKEN, id))
 
 
-async def download_enroled_courses():
+async def queue_enroled_courses():
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
     regex = re.compile(COURSE_NAME_REGEX)
 
     # get the list of enrolled courses
     courses = await get_enroled_courses()
+    sem = asyncio.Semaphore(100)
 
-    async def process(course, course_name, section_name):
+    async def process(sem, course, course_name, section_name):
         logger.info(f'Processing course {course_name} {section_name}')
         course_name = removeDisallowedFilenameChars(course_name)
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
@@ -192,20 +199,25 @@ async def download_enroled_courses():
 
         course_id = course["id"]
         # TODO: Create method to get course contents
-        response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
+        async with sem:
+            response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
         course_sections = json.loads(await response.text())
 
+        tasks = []
         for x in course_sections:
-            asyncio.ensure_future(download_course_section(x, course_dir))
+            tasks.append(queue_course_section(sem, x, course_dir))
+        await asyncio.gather(*tasks)
 
+    tasks = []
     for course in courses:
         match = regex.match(html.unescape(course["fullname"]))
         if not match:
             continue
-        asyncio.ensure_future(process(course, match[1], match[2]))
+        tasks.append(process(sem, course, match[1], match[2]))
+    await asyncio.gather(*tasks)
 
 
-async def download_course_section(course_section: dict, course_dir: str):
+async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str):
     # create folder with name of the course_section
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
     course_section_dir = os.path.join(course_dir, course_section_name)
@@ -225,16 +237,18 @@ async def download_course_section(course_section: dict, course_dir: str):
                 continue
             # we don't know the file name, we use w/e is provided by the server
             download_link = get_final_download_link(link, TOKEN)
-            asyncio.ensure_future(download_file(download_link, course_section_dir, ""))
+            download_queue.append((download_link, course_section_dir, ""))
 
     if "modules" not in course_section:
         return
 
+    tasks = []
     for module in course_section["modules"]:
-        asyncio.ensure_future(download_module(module, course_section_dir))
+        tasks.append(queue_module(sem, module, course_section_dir))
+    await asyncio.gather(*tasks)
 
 
-async def download_module(module: dict, course_section_dir: str):
+async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str):
     # if it's a forum, there will be discussions each of which need a folder
     module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
     module_dir = os.path.join(course_section_dir, module_name)
@@ -250,15 +264,14 @@ async def download_module(module: dict, course_section_dir: str):
             else:
                 file_name = removeDisallowedFilenameChars(content["filename"])
 
-            asyncio.ensure_future(download_file(file_url, module_dir, file_name))
+            download_queue.append((file_url, module_dir, file_name))
     elif module["modname"] == "forum":
         forum_id = module["instance"]
         # (0, 0) -> Returns all discussion
-        response = await session.get(API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
+        async with sem:
+            response = await session.get(API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
         if not response.ok:
-            logger.warning(f'Server responded with {response.status} for {response.real_url}... Retrying')
-            # Schedule this coroutine to run once again
-            asyncio.ensure_future(download_module(module, course_section_dir))
+            logger.warning(f'Server responded with {response.status} for {response.real_url}... Skipping')
             return
         response_json = json.loads(await response.text())
         if "exception" in response_json:
@@ -270,14 +283,14 @@ async def download_module(module: dict, course_section_dir: str):
             forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
             await async_makedirs(forum_discussion_dir)
 
-            if not forum_discussion["attachment"] == "":
+            if isinstance(forum_discussion["attachment"], list):
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
-                    asyncio.ensure_future(download_file(file_url, forum_discussion_dir, file_name))
+                    download_queue.append((file_url, forum_discussion_dir, file_name))
 
 
-async def download_handouts():
+async def queue_handouts():
     """Downloads handouts for all courses whose names matches the regex"""
     regex = re.compile(COURSE_NAME_REGEX)
 
@@ -307,7 +320,7 @@ async def download_handouts():
 
                         short_name = removeDisallowedFilenameChars(match[1].strip()) + "_HANDOUT"
                         logger.info("Downloading:", short_name)
-                        await download_file(file_url, BASE_DIR, short_name, file_ext=file_ext)
+                        download_queue.append((file_url, BASE_DIR, short_name, file_ext))
             else:
                 continue
             break
@@ -397,7 +410,21 @@ async def get_course_categories() -> dict:
     return json.loads(await response.text())
 
 
-async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: str = "") -> bool:
+async def process_download_queue():
+    tasks = []
+    sem = asyncio.Semaphore(100)
+    for param in download_queue:
+        tasks.append(download_file(sem, *param))
+    await asyncio.gather(*tasks)
+
+
+async def download_file(
+    sem: asyncio.Semaphore,
+    file_url: str,
+    file_dir: str,
+    file_name: str,
+    file_ext: str = ""
+) -> bool:
     """Download file asynchronously
 
     if `file_name` is empty, file name will be obtained from the
@@ -407,15 +434,14 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
     If the download fails for whatever reason, it is requeed.
     """
     try:
-        async with session.get(file_url, chunked=1024) as response:
+        async with sem, session.get(file_url) as response:
             response: aiohttp.ClientResponse
             if not response.ok:
-                logger.warning(f'Server responded with {response.status} when downloading {response.real_url}... Skipping')
-                return
-
+                logger.warning(f'Server responded with {response.status} when downloading'
+                               ' {response.real_url} ... Skipping')
             if not file_name:
                 if not response.content_disposition:
-                    logger.error(f'Cannot download {file_url}... Empty file name and content disposititon')
+                    logger.error(f'Cannot download {file_url} ... Empty file name and content disposititon')
                     return False
                 file_name = response.content_disposition.filename
 
@@ -434,11 +460,10 @@ async def download_file(file_url: str, file_dir: str, file_name: str, file_ext: 
             logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
 
             with open(path, "wb+") as f:
-                async for chunk in response.content.iter_chunked(1024):
-                    f.write(chunk)
+                f.write(await response.content.read())
             return True
     except asyncio.TimeoutError:
-        asyncio.ensure_future(download_file(file_url, file_dir, file_name, file_ext))
+        download_queue.append(file_url, file_dir, file_name, file_ext)
 
 
 async def async_makedirs(path, *args, **kwargs):
