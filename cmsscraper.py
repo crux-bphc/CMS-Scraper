@@ -476,7 +476,7 @@ async def download_file(
             with open(path, "wb+") as f:
                 f.write(await response.content.read())
             return True
-    except (asyncio.TimeoutError, aiohttp.ServerDisconnectedError):
+    except BaseException:
         logger.warning(f'Timed out on url {file_url}... Retrying')
         download_queue.append((file_url, file_dir, file_name, file_ext))
 
