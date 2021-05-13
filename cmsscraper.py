@@ -2,7 +2,7 @@
 import argparse
 import asyncio
 import html
-import json
+import ujson
 import logging
 import logging.config
 import os
@@ -13,6 +13,8 @@ from functools import partial
 
 import aiohttp
 from bs4 import BeautifulSoup
+
+json = ujson # TODO: Replace json references with ujson instead of setting global variable
 
 WEB_SERVER = "https://cms.bits-hyderabad.ac.in"
 
@@ -26,6 +28,8 @@ VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 COURSE_CATEGORY_NAME = ""
 
 COURSE_NAME_REGEX = r"^([\w\d \-\/'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
+
+SEMAPHORE_COUNT = 10
 
 # API Endpoints
 API_BASE = WEB_SERVER + "/webservice/rest/server.php?"
@@ -56,7 +60,7 @@ download_queue = []
 
 course_categories = []
 
-session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector())
+session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(), timeout=aiohttp.ClientTimeout(total=30100))
 
 download_queue = []
 
@@ -168,7 +172,7 @@ async def enrol_all_courses():
 
 async def enrol_courses(courses: dict):
     """Enrol to all specified courses"""
-    sem = asyncio.Semaphore(100)
+    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     enroled_courses = [x['id'] for x in await get_enroled_courses()]
     to_enrol = [x for x in courses if x["id"] not in enroled_courses]
     futures = [enrol_course(sem, x['id'], x['fullname']) for x in to_enrol]
@@ -187,7 +191,7 @@ async def queue_enroled_courses():
 
     # get the list of enrolled courses
     courses = await get_enroled_courses()
-    sem = asyncio.Semaphore(100)
+    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
 
     async def process(sem, course, course_name, section_name):
         logger.info(f'Processing course {course_name} {section_name}')
@@ -338,9 +342,10 @@ async def unenrol_all():
     courses = await get_enroled_courses()
     logger.info(f'Unenroling from {len(courses)} courses')
 
-    sem = asyncio.Semaphore(25)
+    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     futures = [unenrol_course(sem, x) for x in courses]
     returns = await asyncio.gather(*futures, return_exceptions=True)
+
     print(returns)
 
 
@@ -405,7 +410,7 @@ async def get_course_categories() -> dict:
 
 async def process_download_queue():
     tasks = []
-    sem = asyncio.Semaphore(100)
+    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     for param in download_queue:
         tasks.append(download_file(sem, *param))
     await asyncio.gather(*tasks)
@@ -456,7 +461,8 @@ async def download_file(
                 f.write(await response.content.read())
             return True
     except asyncio.TimeoutError:
-        download_queue.append(file_url, file_dir, file_name, file_ext)
+        logger.warning(f'Timed out on url {file_url}... Retrying')
+        download_queue.append((file_url, file_dir, file_name, file_ext))
 
 
 async def async_makedirs(path, *args, **kwargs):
