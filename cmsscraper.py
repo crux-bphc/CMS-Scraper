@@ -9,6 +9,7 @@ import re
 import string
 import unicodedata
 from functools import partial
+from typing import List
 
 import aiohttp
 import ujson
@@ -187,22 +188,24 @@ async def enrol_course(sem: asyncio.Semaphore, id: int, fullname: str):
         await session.get(API_ENROL_COURSE.format(TOKEN, id))
 
 
-async def queue_enroled_courses() -> list[asyncio.Future]:
+async def queue_enroled_courses() -> List[asyncio.Future]:
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
     regex = re.compile(COURSE_NAME_REGEX)
     awaitables = []
 
     # get the list of enrolled courses
+    logging.info("Fetching enroled courses")
     courses = await get_enroled_courses()
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
 
-    async def process(sem, course, course_name, section_name):
+    async def process(sem, course, course_name, section_name) -> List[asyncio.Future]:
+        awaitables = []
         logger.info(f'Processing course {course_name} {section_name}')
         course_name = removeDisallowedFilenameChars(course_name)
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
         # create folders
-        async_makedirs(course_dir)
+        awaitables.append(async_makedirs(course_dir))
 
         course_id = course["id"]
         # TODO: Create method to get course contents
@@ -213,19 +216,24 @@ async def queue_enroled_courses() -> list[asyncio.Future]:
         tasks = []
         for x in course_sections:
             tasks.append(queue_course_section(sem, x, course_dir))
-        await asyncio.gather(*tasks)
 
+        for x in await asyncio.gather(*tasks):
+            awaitables += x
+        return awaitables
     tasks = []
     for course in courses:
         match = regex.match(html.unescape(course["fullname"]))
         if not match:
             continue
         tasks.append(process(sem, course, match[1], match[2]))
-    awaitables.append(*await asyncio.gather(*tasks))
+
+    for x in await asyncio.gather(*tasks):
+        awaitables += x
+    print(awaitables)
     return awaitables
 
 
-async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str) -> list[asyncio.Future]:
+async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str) -> List[asyncio.Future]:
     # create folder with name of the course_section
     awaitables = []
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
@@ -238,7 +246,7 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
         soup = BeautifulSoup(summary, features="lxml")
         anchors = soup.find_all('a')
         if not anchors:
-            return
+            return awaitables
         for anchor in anchors:
             link = anchor.get('href')
             # Download the file only if it's on the same domain
@@ -249,16 +257,18 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
             download_queue.append((download_link, course_section_dir, ""))
 
     if "modules" not in course_section:
-        return
+        return awaitables
 
     tasks = []
     for module in course_section["modules"]:
         tasks.append(queue_module(sem, module, course_section_dir))
-    awaitables.append(*await asyncio.gather(*tasks))
+
+    for x in await asyncio.gather(*tasks):
+        awaitables += x
     return awaitables
 
 
-async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str) -> list[asyncio.Future]:
+async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str) -> List[asyncio.Future]:
     # if it's a forum, there will be discussions each of which need a folder
     awaitables = []
     module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
@@ -283,10 +293,10 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
             response = await session.get(API_GET_FORUM_DISCUSSIONS.format(TOKEN, forum_id, 0, 0))
         if not response.ok:
             logger.warning(f'Server responded with {response.status} for {response.real_url}... Skipping')
-            return
+            return awaitables
         response_json = json.loads(await response.text())
         if "exception" in response_json:
-            return   # probably no discussion associated with module
+            return awaitables # probably no discussion associated with module
 
         forum_discussions = response_json["discussions"]
         for forum_discussion in forum_discussions:
@@ -298,7 +308,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
-                    download_queue.append((file_url, forum_discussion_dir, file_name))
+                    download_queue.append((file_url, forum_discussion, file_name))
     return awaitables
 
 
