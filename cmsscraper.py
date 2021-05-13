@@ -229,7 +229,6 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
 
     for x in await asyncio.gather(*tasks):
         awaitables += x
-    print(awaitables)
     return awaitables
 
 
@@ -363,9 +362,7 @@ async def unenrol_all():
 
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     futures = [unenrol_course(sem, x) for x in courses]
-    returns = await asyncio.gather(*futures, return_exceptions=True)
-
-    print(returns)
+    await asyncio.gather(*futures, return_exceptions=True)
 
 
 async def unenrol_course(sem: asyncio.Semaphore, course: dict):
