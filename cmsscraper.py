@@ -100,11 +100,11 @@ async def main():
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
                                 COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
 
-    logger.info("Verifying Token")
     response = await session.get(API_CHECK_TOKEN.format(TOKEN))
     if not response.status == 200:
         logger.error("Bad response code while verifying token: " + str(response.status))
         return
+    logger.info("Token Verified")
 
     js = json.loads(await response.text())
     if 'exception' in js and js['errorcode'] == 'invalidtoken':
@@ -129,7 +129,7 @@ async def main():
 
     if args.unenroll_all and not args.all and not args.handouts:
         # unenroll all courses and exit out
-        await unenrol_all(args.session_cookie)
+        await unenrol_all()
     else:
         if args.preserve:
             enrolled_courses = await get_enroled_courses()
@@ -156,7 +156,7 @@ async def main():
             logger.info("No files to download!")
 
         if args.preserve and args.all:
-            await unenrol_all(args.session_cookie)
+            await unenrol_all()
             await enrol_courses(enrolled_courses)
 
 
@@ -336,56 +336,49 @@ async def unenrol_all():
         return
 
     courses = await get_enroled_courses()
-    logger.info(f'Unerolling from {len(courses)} courses')
+    logger.info(f'Unenroling from {len(courses)} courses')
 
-    futures = [unenrol_course(x) for x in courses]
-    asyncio.gather(futures)
+    sem = asyncio.Semaphore(25)
+    futures = [unenrol_course(sem, x) for x in courses]
+    returns = await asyncio.gather(*futures, return_exceptions=True)
+    print(returns)
 
 
-async def unenrol_course(course: dict, retry_count: int = 0):
-    course_id = course["id"]
+async def unenrol_course(sem: asyncio.Semaphore, course: dict):
+    async with sem:
+        course_id = course["id"]
 
-    r = await session.post(WEB_SERVER + SITE_COURSE.format(course_id))
-    if not r.ok:
-        if retry_count >= 10:
-            logger.failed(f'Failed to unenrol from {course["fullname"]}, exceeded retries')
+        r = await session.post(WEB_SERVER + SITE_COURSE.format(course_id))
+        if not r.ok:
+            logger.error(f'Failed to unenrol from {course["fullname"]}')
+
+        soup = BeautifulSoup(await r.text(), features='lxml')
+        anchors = soup.find_all('a', href=re.compile('.*unenrolself.php'))
+        if not anchors:
+            logger.warning(f'Failed to unenroll from: {course["fullname"]}... No anchors found')
             return
-        asyncio.ensure_future(unenrol_course(course, retry_count+1))
-        return
 
-    soup = BeautifulSoup(await r.text(), features='lxml')
-    anchors = soup.find_all('a', href=re.compile('.*unenrolself.php'))
-    if not anchors:
-        logger.warning(f'Failed to unenroll from: {course["fullname"]}... No anchors found')
-        asyncio.ensure_future(unenrol_course(course, retry_count+1))
-        return
-
-    unenrol_link = anchors[0]['href']
-    r = session.post(unenrol_link)
-    if not r.ok:
-        if retry_count >= 10:
-            logger.error(f'Failed to unenrol from {course["fullname"]}, exceeded retries')
+        unenrol_link = anchors[0]['href']
+        r = await session.post(unenrol_link)
+        if not r.ok:
+            logger.error(f'Failed to unenrol from {course["fullname"]}')
             return
-        asyncio.ensure_future(unenrol_course(course, retry_count+1))
-        return
 
-    soup = BeautifulSoup(r.content, features="lxml")
-    form = soup.find('form', action=f'{WEB_SERVER}/enrol/self/unenrolself.php')
-    if not form:
-        logger.error(f'Failed to unenroll from: {course["fullname"]}... Form not found')
-        asyncio.ensure_future(unenrol_course(course, retry_count+1))
-        return
+        soup = BeautifulSoup(await r.text(), features="lxml")
+        form = soup.find('form', action=f'{WEB_SERVER}/enrol/self/unenrolself.php')
+        if not form:
+            logger.error(f'Failed to unenroll from: {course["fullname"]}... Form not found')
+            return
 
-    enrolid = form.find('input', {'name': 'enrolid'})['value']
-    sesskey = form.find('input', {'name': 'sesskey'})['value']
+        enrolid = form.find('input', {'name': 'enrolid'})['value']
+        sesskey = form.find('input', {'name': 'sesskey'})['value']
 
-    payload = {'enrolid': enrolid, 'confirm': '1', 'sesskey': sesskey}
-    r = session.post(f'{WEB_SERVER}/enrol/self/unenrolself.php', data=payload)
-    if r.status_code >= 200 and r.status_code < 400:
-        logger.info('Unenrolled from: ', course['fullname'])
-    else:
-        logger.error(f'Failed to unenroll from: {course["fullname"]}... Final post failed')
-        asyncio.ensure_future(unenrol_course(course, retry_count+1))
+        payload = {'enrolid': enrolid, 'confirm': '1', 'sesskey': sesskey}
+        r = await session.post(f'{WEB_SERVER}/enrol/self/unenrolself.php', data=payload)
+        if r.ok:
+            logger.info(f'Unenrolled from: {course["fullname"]}')
+        else:
+            logger.error(f'Failed to unenroll from: {course["fullname"]}... Final post failed')
 
 
 async def get_all_courses() -> dict:
