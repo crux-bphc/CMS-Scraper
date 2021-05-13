@@ -29,7 +29,7 @@ COURSE_CATEGORY_NAME = ""
 
 COURSE_NAME_REGEX = r"^([\w\d \-\/'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
-SEMAPHORE_COUNT = 10
+SEMAPHORE_COUNT = 25
 
 # API Endpoints
 API_BASE = WEB_SERVER + "/webservice/rest/server.php?"
