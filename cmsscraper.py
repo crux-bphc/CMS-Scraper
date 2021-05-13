@@ -200,7 +200,6 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
 
     async def process(sem, course, course_name, section_name) -> List[asyncio.Future]:
         awaitables = []
-        logger.info(f'Processing course {course_name} {section_name}')
         course_name = removeDisallowedFilenameChars(course_name)
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
@@ -219,6 +218,8 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
 
         for x in await asyncio.gather(*tasks):
             awaitables += x
+
+        logger.info(f'Finished Processing course {course_name} {section_name}')
         return awaitables
     tasks = []
     for course in courses:
@@ -295,7 +296,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
             return awaitables
         response_json = json.loads(await response.text())
         if "exception" in response_json:
-            return awaitables # probably no discussion associated with module
+            return awaitables  # probably no discussion associated with module
 
         forum_discussions = response_json["discussions"]
         for forum_discussion in forum_discussions:
