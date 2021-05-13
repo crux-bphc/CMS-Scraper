@@ -117,7 +117,7 @@ async def main():
         return
 
     user_id = js['userid']
-    await async_makedirs(BASE_DIR)
+    async_makedirs(BASE_DIR)
 
     if args.session_cookie is None:
         if args.unenroll_all:
@@ -152,7 +152,8 @@ async def main():
         if args.handouts:
             await queue_handouts()
         else:
-            await queue_enroled_courses()
+            # Await any queued futures before we return
+            await asyncio.gather(*await queue_enroled_courses())
 
         if download_queue:
             logger.info(f"Downloading {len(download_queue)} files...")
@@ -186,9 +187,10 @@ async def enrol_course(sem: asyncio.Semaphore, id: int, fullname: str):
         await session.get(API_ENROL_COURSE.format(TOKEN, id))
 
 
-async def queue_enroled_courses():
+async def queue_enroled_courses() -> list[asyncio.Future]:
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
     regex = re.compile(COURSE_NAME_REGEX)
+    awaitables = []
 
     # get the list of enrolled courses
     courses = await get_enroled_courses()
@@ -200,7 +202,7 @@ async def queue_enroled_courses():
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
 
         # create folders
-        await async_makedirs(course_dir)
+        async_makedirs(course_dir)
 
         course_id = course["id"]
         # TODO: Create method to get course contents
@@ -219,14 +221,16 @@ async def queue_enroled_courses():
         if not match:
             continue
         tasks.append(process(sem, course, match[1], match[2]))
-    await asyncio.gather(*tasks)
+    awaitables.append(*await asyncio.gather(*tasks))
+    return awaitables
 
 
-async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str):
+async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str) -> list[asyncio.Future]:
     # create folder with name of the course_section
+    awaitables = []
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
     course_section_dir = os.path.join(course_dir, course_section_name)
-    await async_makedirs(course_section_dir)
+    awaitables.append(async_makedirs(course_section_dir))
 
     # Sometimes professors use section descriptions as announcements and embed file links
     summary = course_section["summary"]
@@ -250,14 +254,16 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
     tasks = []
     for module in course_section["modules"]:
         tasks.append(queue_module(sem, module, course_section_dir))
-    await asyncio.gather(*tasks)
+    awaitables.append(*await asyncio.gather(*tasks))
+    return awaitables
 
 
-async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str):
+async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str) -> list[asyncio.Future]:
     # if it's a forum, there will be discussions each of which need a folder
+    awaitables = []
     module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
     module_dir = os.path.join(course_section_dir, module_name)
-    await async_makedirs(module_dir)
+    awaitables.append(async_makedirs(module_dir))
 
     if module["modname"].lower() in ("resource", "folder"):
         for content in module["contents"]:
@@ -286,13 +292,14 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
         for forum_discussion in forum_discussions:
             forum_discussion_name = removeDisallowedFilenameChars(forum_discussion["name"][:50].strip())
             forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
-            await async_makedirs(forum_discussion_dir)
+            awaitables.append(async_makedirs(forum_discussion_dir))
 
             if isinstance(forum_discussion["attachment"], list):
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
                     download_queue.append((file_url, forum_discussion_dir, file_name))
+    return awaitables
 
 
 async def queue_handouts():
@@ -340,6 +347,7 @@ async def unenrol_all():
         logger.error('Invalid session cookie')
         return
 
+    logger.info("Fetching user courses")
     courses = await get_enroled_courses()
     logger.info(f'Unenroling from {len(courses)} courses')
 
@@ -461,15 +469,16 @@ async def download_file(
             with open(path, "wb+") as f:
                 f.write(await response.content.read())
             return True
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, aiohttp.ServerDisconnectedError):
         logger.warning(f'Timed out on url {file_url}... Retrying')
         download_queue.append((file_url, file_dir, file_name, file_ext))
 
 
-async def async_makedirs(path, *args, **kwargs):
+def async_makedirs(path, *args, **kwargs) -> asyncio.Future:
+    """Make directories asynchronously by using the default loop executor"""
     loop = asyncio.get_event_loop()
     pfunc = partial(os.makedirs, path, *args, **kwargs, exist_ok=True)
-    return await loop.run_in_executor(None, pfunc)
+    return loop.run_in_executor(None, pfunc)
 
 
 def get_category_id_from_name(category_name: str) -> int:
