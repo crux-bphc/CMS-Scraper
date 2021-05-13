@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import html
-import ujson
 import logging
 import logging.config
 import os
@@ -12,9 +11,10 @@ import unicodedata
 from functools import partial
 
 import aiohttp
+import ujson
 from bs4 import BeautifulSoup
 
-json = ujson # TODO: Replace json references with ujson instead of setting global variable
+json = ujson  # TODO: Replace json references with ujson instead of setting global variable
 
 WEB_SERVER = "https://cms.bits-hyderabad.ac.in"
 
@@ -60,7 +60,8 @@ download_queue = []
 
 course_categories = []
 
-session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(), timeout=aiohttp.ClientTimeout(total=30100))
+session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(),
+                                                       timeout=aiohttp.ClientTimeout(total=100))
 
 download_queue = []
 
