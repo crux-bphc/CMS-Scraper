@@ -455,7 +455,7 @@ async def download_file(
             response: aiohttp.ClientResponse
             if not response.ok:
                 logger.warning(f'Server responded with {response.status} when downloading'
-                               ' {response.real_url} ... Skipping')
+                               f' {response.real_url} ... Skipping')
             if not file_name:
                 if not response.content_disposition:
                     logger.error(f'Cannot download {file_url} ... Empty file name and content disposititon')
