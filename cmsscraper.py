@@ -156,9 +156,10 @@ async def main():
             # If this is not done, synchronization issues will arise
             await asyncio.gather(*await queue_enroled_courses())
 
-        if download_queue:
+        if download_queue.qsize() > 0:
             logger.info(f"Downloading {download_queue.qsize()} files...")
-            await process_download_queue()
+            returns = await process_download_queue()
+            logging.info(f'Finished processing downloads... Skipped {len(returns.count(False))} files')
         else:
             logger.info("No files to download!")
 
@@ -434,7 +435,13 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
         path = os.path.join(file_dir, file_name + file_ext)
         if not file_size == -1 and os.path.exists(path) and os.stat(path).st_size == file_size:
             return
+
+        if file_size >= 512 * 1024 * 1024:
+            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds 500MiB')
+            return
+
         download_queue.put((file_url, file_dir, file_name, file_ext))
+
     loop = asyncio.get_event_loop()
     pfunc = partial(process, file_url, file_dir, file_name, file_ext, file_size)
     return loop.run_in_executor(None, pfunc)
@@ -445,7 +452,7 @@ async def process_download_queue():
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     for param in list(download_queue.queue):
         tasks.append(download_file(sem, *param))
-    await asyncio.gather(*tasks)
+    return await asyncio.gather(*tasks)
 
 
 async def download_file(
@@ -480,12 +487,6 @@ async def download_file(
             # Ignore if file already exists
             length = int(response.headers['content-length'])
             humanized_length = humanized_sizeof(length)
-            if os.path.exists(path) and os.path.getsize(path) == length:
-                return False
-
-            if length >= 512 * 1024 * 1024:
-                logger.info(f'Skipping file: {file_url}, Length={humanized_length}, exceeds 500MiB')
-                return False
 
             logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
 
@@ -494,6 +495,7 @@ async def download_file(
             return True
     except BaseException:
         logger.warning(f'Exception downloading {file_url}... Skipping')
+        return False
 
 
 def async_makedirs(path, *args, **kwargs) -> asyncio.Future:
