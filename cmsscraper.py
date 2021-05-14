@@ -159,7 +159,7 @@ async def main():
         if download_queue.qsize() > 0:
             logger.info(f"Downloading {download_queue.qsize()} files...")
             returns = await process_download_queue()
-            logging.info(f'Finished processing downloads... Skipped {len(returns.count(False))} files')
+            logging.info(f'Finished processing downloads... Skipped {returns.count(False)} files')
         else:
             logger.info("No files to download!")
 
@@ -447,7 +447,7 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
     return loop.run_in_executor(None, pfunc)
 
 
-async def process_download_queue():
+async def process_download_queue() -> List[bool]:
     tasks = []
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     for param in list(download_queue.queue):
