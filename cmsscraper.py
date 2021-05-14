@@ -493,8 +493,7 @@ async def download_file(
                 f.write(await response.content.read())
             return True
     except BaseException:
-        logger.warning(f'Exception downloading {file_url}... Retrying')
-        download_queue.append((file_url, file_dir, file_name, file_ext))
+        logger.warning(f'Exception downloading {file_url}... Skipping')
 
 
 def async_makedirs(path, *args, **kwargs) -> asyncio.Future:
