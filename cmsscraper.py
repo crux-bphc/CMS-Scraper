@@ -149,11 +149,11 @@ async def main():
         if args.all:
             await enrol_all_courses()
 
+        # Await any queued futures before we continue
+        # If this is not done, synchronization issues will arise
         if args.handouts:
-            await queue_handouts()
+            await asyncio.gather(*await queue_handouts())
         else:
-            # Await any queued futures before we continue
-            # If this is not done, synchronization issues will arise
             await asyncio.gather(*await queue_enroled_courses())
 
         if download_queue.qsize() > 0:
@@ -318,6 +318,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
 async def queue_handouts():
     """Downloads handouts for all courses whose names matches the regex"""
     regex = re.compile(COURSE_NAME_REGEX)
+    awaitables = []
 
     logger.info("Downloading handouts")
 
@@ -330,7 +331,7 @@ async def queue_handouts():
         match = regex.match(full_name)
         if not match:
             return
-        logger.info(f"Processing: {full_name}")
+
         course_id = course["id"]
         response = await session.get(API_GET_COURSE_CONTENTS.format(TOKEN, course_id))
         course_sections = json.loads(await response.text())
@@ -342,15 +343,17 @@ async def queue_handouts():
                         file_url = content["fileurl"]
                         file_url = get_final_download_link(file_url, TOKEN)
                         file_ext = content["filename"][content["filename"].rfind("."):]
-
                         short_name = removeDisallowedFilenameChars(match[1].strip()) + "_HANDOUT"
-                        logger.info("Downloading:", short_name)
-                        download_queue.append((file_url, BASE_DIR, short_name, file_ext))
+
+                        logging.info(f'Queuing handout for {full_name}')
+                        awaitables.append(add_to_download_queue(file_url, BASE_DIR, short_name, file_ext, -1))
+                        break
             else:
                 continue
             break
 
     await asyncio.gather(*[process(x) for x in courses])
+    return awaitables
 
 
 async def unenrol_all():
