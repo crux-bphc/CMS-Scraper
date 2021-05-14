@@ -8,6 +8,7 @@ import os
 import re
 import string
 import unicodedata
+import queue
 from functools import partial
 from typing import List
 
@@ -57,14 +58,12 @@ logger: logging.Logger = logging.getLogger()
 
 user_id = 0
 
-download_queue = []
+download_queue = queue.Queue()  # A thread safe queue
 
 course_categories = []
 
 session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConnector(),
                                                        timeout=aiohttp.ClientTimeout(total=100))
-
-download_queue = []
 
 
 async def main():
@@ -153,11 +152,12 @@ async def main():
         if args.handouts:
             await queue_handouts()
         else:
-            # Await any queued futures before we return
+            # Await any queued futures before we continue
+            # If this is not done, synchronization issues will arise
             await asyncio.gather(*await queue_enroled_courses())
 
         if download_queue:
-            logger.info(f"Downloading {len(download_queue)} files...")
+            logger.info(f"Downloading {download_queue.qsize()} files...")
             await process_download_queue()
         else:
             logger.info("No files to download!")
@@ -254,7 +254,7 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
                 continue
             # we don't know the file name, we use w/e is provided by the server
             download_link = get_final_download_link(link, TOKEN)
-            download_queue.append((download_link, course_section_dir, ""))
+            awaitables.append(add_to_download_queue(download_link, course_section_dir, "", "", -1))
 
     if "modules" not in course_section:
         return awaitables
@@ -278,6 +278,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
     if module["modname"].lower() in ("resource", "folder"):
         for content in module["contents"]:
             file_url = content["fileurl"]
+            file_size = content["filesize"]
             file_url = get_final_download_link(file_url, TOKEN)
             if module["name"].lower() == "handout":
                 # rename handouts to HANDOUT
@@ -285,7 +286,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
             else:
                 file_name = removeDisallowedFilenameChars(content["filename"])
 
-            download_queue.append((file_url, module_dir, file_name))
+            awaitables.append(add_to_download_queue(file_url, module_dir, file_name, "", file_size))
     elif module["modname"] == "forum":
         forum_id = module["instance"]
         # (0, 0) -> Returns all discussion
@@ -308,7 +309,8 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
-                    download_queue.append((file_url, forum_discussion, file_name))
+                    file_size = attachment["filesize"]
+                    awaitables.append(add_to_download_queue(file_url, forum_discussion_dir, file_name, "", file_size))
     return awaitables
 
 
@@ -425,10 +427,23 @@ async def get_course_categories() -> dict:
     return json.loads(await response.text())
 
 
+def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext: str,
+                          file_size: int = -1) -> asyncio.Future:
+    def process(file_url: str, file_dir: str, file_name: str, file_ext: str, file_size: int):
+        # Check if file already exists and only then add it to the queue
+        path = os.path.join(file_dir, file_name + file_ext)
+        if not file_size == -1 and os.path.exists(path) and os.stat(path).st_size == file_size:
+            return
+        download_queue.put((file_url, file_dir, file_name, file_ext))
+    loop = asyncio.get_event_loop()
+    pfunc = partial(process, file_url, file_dir, file_name, file_ext, file_size)
+    return loop.run_in_executor(None, pfunc)
+
+
 async def process_download_queue():
     tasks = []
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
-    for param in download_queue:
+    for param in list(download_queue.queue):
         tasks.append(download_file(sem, *param))
     await asyncio.gather(*tasks)
 
