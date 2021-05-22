@@ -144,7 +144,9 @@ async def main():
         if args.restore:
             with open('preserved.json', 'r') as f:
                 to_enrol = json.load(f)
-                enrol_courses(to_enrol)
+                await enrol_courses(to_enrol)
+                logger.info('Restored previously preserved courses!')
+                return
 
         if args.all:
             await enrol_all_courses()
