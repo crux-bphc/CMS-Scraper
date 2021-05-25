@@ -487,6 +487,7 @@ async def download_file(
             if not response.ok:
                 logger.warning(f'Server responded with {response.status} when downloading'
                                f' {response.real_url} ... Skipping')
+                return False
             if not file_name:
                 if not response.content_disposition:
                     logger.error(f'Cannot download {file_url} ... Empty file name and content disposititon')
@@ -496,7 +497,7 @@ async def download_file(
             path = os.path.join(file_dir, file_name + file_ext)
 
             # Ignore if file already exists
-            length = int(response.headers['content-length'])
+            length = int(response.headers.get('content-length', 0))
             humanized_length = humanized_sizeof(length)
 
             logger.info(f'Downloading file: {file_url}, Length={humanized_length}')
@@ -504,8 +505,8 @@ async def download_file(
             with open(path, "wb+") as f:
                 f.write(await response.content.read())
             return True
-    except BaseException:
-        logger.warning(f'Exception downloading {file_url}... Skipping')
+    except BaseException as e:
+        logger.warning(f'Exception "{type(e)}: {str(e)}" downloading {file_url}... Skipping')
         return False
 
 
