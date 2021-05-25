@@ -5,10 +5,10 @@ import html
 import logging
 import logging.config
 import os
+import queue
 import re
 import string
 import unicodedata
-import queue
 from functools import partial
 from typing import List
 
@@ -54,7 +54,7 @@ BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAM
 
 TOKEN = ""
 
-MAX_DOWNLOAD_SIZE=2048
+MAX_DOWNLOAD_SIZE = 2048
 
 logger: logging.Logger = logging.getLogger()
 
