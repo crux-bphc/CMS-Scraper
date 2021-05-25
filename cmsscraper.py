@@ -54,6 +54,8 @@ BASE_DIR = os.path.join(os.getcwd(), COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAM
 
 TOKEN = ""
 
+MAX_DOWNLOAD_SIZE=2048
+
 logger: logging.Logger = logging.getLogger()
 
 user_id = 0
@@ -72,6 +74,7 @@ async def main():
     global user_id
     global BASE_DIR
     global COURSE_CATEGORY_NAME
+    global MAX_DOWNLOAD_SIZE
     global course_categories
     global session
 
@@ -89,17 +92,20 @@ async def main():
     parser.add_argument('--unenroll-all', action='store_true', help='Uneroll from all courses. ' +
                         'If --all and/or --handouts is specified, download and then unenroll all')
     parser.add_argument('--handouts', action='store_true', help='Download only handouts')
-    parser.add_argument('--all', action='store_true', help='Atuomatically enrol to all courses and download files')
+    parser.add_argument('--all', action='store_true', help='Automatically enrol to all courses and download files')
     parser.add_argument('--preserve', action='store_true', help='Preserves the courses you are enrolled to. ' +
                         ' If the --all flag is specified, then you must provide a session cookie to unenroll from ' +
                         ' courses.')
     parser.add_argument('--restore', action='store_true', help='Restores previously preserved courses. To be used after'
                         ' unenrolling from all courses.')
+    parser.add_argument('--max-download-size', action='store', help='Set the maximum file size that will be downloaded'
+                        ' in MiB', default=2048)
 
     args = parser.parse_args()
 
     TOKEN = args.token
     COURSE_CATEGORY_NAME = args.category
+    MAX_DOWNLOAD_SIZE = args.max_download_size
 
     if args.destination is not None:
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
@@ -441,7 +447,7 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
         if not file_size == -1 and os.path.exists(path) and os.stat(path).st_size == file_size:
             return
 
-        if file_size >= 512 * 1024 * 1024:
+        if file_size >= MAX_DOWNLOAD_SIZE * 1024 * 1024:
             logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds 500MiB')
             return
 
