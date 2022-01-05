@@ -99,14 +99,13 @@ async def main():
     parser.add_argument('--restore', action='store_true', help='Restores previously preserved courses. To be used after'
                         ' unenrolling from all courses.')
     parser.add_argument('--max-download-size', action='store', help='Set the maximum file size that will be downloaded'
-                        ' in MiB', default=2048)
+                        ' in MiB', default=2048, type=int)
 
     args = parser.parse_args()
 
     TOKEN = args.token
     COURSE_CATEGORY_NAME = args.category
     MAX_DOWNLOAD_SIZE = args.max_download_size
-
     if args.destination is not None:
         BASE_DIR = os.path.join(os.path.abspath(os.path.expanduser(args.destination)),
                                 COURSE_CATEGORY_NAME if COURSE_CATEGORY_NAME else "CMS")
