@@ -284,17 +284,18 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
     awaitables.append(async_makedirs(module_dir))
 
     if module["modname"].lower() in ("resource", "folder"):
-        for content in module["contents"]:
-            file_url = content["fileurl"]
-            file_size = content["filesize"]
-            file_url = get_final_download_link(file_url, TOKEN)
-            if module["name"].lower() == "handout":
-                # rename handouts to HANDOUT
-                file_name = "".join(("HANDOUT", content["filename"][content["filename"].rfind("."):]))
-            else:
-                file_name = removeDisallowedFilenameChars(content["filename"])
+        if 'contents' in module:
+            for content in module["contents"]:
+                file_url = content["fileurl"]
+                file_size = content["filesize"]
+                file_url = get_final_download_link(file_url, TOKEN)
+                if module["name"].lower() == "handout":
+                    # rename handouts to HANDOUT
+                    file_name = "".join(("HANDOUT", content["filename"][content["filename"].rfind("."):]))
+                else:
+                    file_name = removeDisallowedFilenameChars(content["filename"])
 
-            awaitables.append(add_to_download_queue(file_url, module_dir, file_name, "", file_size))
+                awaitables.append(add_to_download_queue(file_url, module_dir, file_name, "", file_size))
     elif module["modname"] == "forum":
         forum_id = module["instance"]
         # (0, 0) -> Returns all discussion
