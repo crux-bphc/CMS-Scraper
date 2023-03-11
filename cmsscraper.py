@@ -331,7 +331,6 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
             forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
             awaitables.append(async_makedirs(forum_discussion_dir))
 
-
             if (save_html and "message" in forum_discussion and len(forum_discussion["message"]) > 0):
                 awaitables.append(
                     add_to_html_queue(
@@ -344,6 +343,7 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
                 )
 
 
+            if "attachments" in forum_discussion and isinstance(forum_discussion["attachments"], list):
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
