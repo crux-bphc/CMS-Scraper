@@ -477,7 +477,7 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
             return
 
         if file_size >= MAX_DOWNLOAD_SIZE * 1024 * 1024:
-            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds {humanized_sizeof(MAX_DOWNLOAD_SIZE * 1024 * 1024)}')
+            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds 500MiB')
             return
 
         download_queue.put((file_url, file_dir, file_name, file_ext))
