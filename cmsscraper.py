@@ -61,6 +61,7 @@ logger: logging.Logger = logging.getLogger()
 user_id = 0
 
 download_queue = queue.Queue()  # A thread safe queue
+html_queue = queue.Queue()
 
 course_categories = []
 
@@ -93,6 +94,7 @@ async def main():
                         'If --all and/or --handouts is specified, download and then unenroll all')
     parser.add_argument('--handouts', action='store_true', help='Download only handouts')
     parser.add_argument('--all', action='store_true', help='Automatically enrol to all courses and download files')
+    parser.add_argument("--html", action="store_true", help="Save HTML content as well")
     parser.add_argument('--preserve', action='store_true', help='Preserves the courses you are enrolled to. ' +
                         ' If the --all flag is specified, then you must provide a session cookie to unenroll from ' +
                         ' courses.')
@@ -161,7 +163,7 @@ async def main():
         if args.handouts:
             await asyncio.gather(*await queue_handouts())
         else:
-            await asyncio.gather(*await queue_enroled_courses())
+            await asyncio.gather(*await queue_enroled_courses(args.html))
 
         if download_queue.qsize() > 0:
             logger.info(f"Downloading {download_queue.qsize()} files...")
@@ -169,6 +171,15 @@ async def main():
             logging.info(f'Finished processing downloads... Skipped {returns.count(False)} files')
         else:
             logger.info("No files to download!")
+
+        if args.html and html_queue.qsize() > 0:
+            logger.info(f"Saving {html_queue.qsize()} html files...")
+
+            returns = await process_html_queue()
+            logging.info(f"Finished processing html files... Skipped {returns.count(False)} files")
+
+        else:
+            logger.info("No html files to save!")
 
         if args.preserve and args.all:
             await unenrol_all()
@@ -196,7 +207,7 @@ async def enrol_course(sem: asyncio.Semaphore, id: int, fullname: str):
         await session.get(API_ENROL_COURSE.format(TOKEN, id))
 
 
-async def queue_enroled_courses() -> List[asyncio.Future]:
+async def queue_enroled_courses(save_html: bool) -> List[asyncio.Future]:
     # the regex group represents the fully qualified name of the course (excluding the year and sem info)
     regex = re.compile(COURSE_NAME_REGEX)
     awaitables = []
@@ -206,7 +217,7 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
     courses = await get_enroled_courses()
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
 
-    async def process(sem, course, course_name, section_name) -> List[asyncio.Future]:
+    async def process(sem, course, course_name, section_name, save_html) -> List[asyncio.Future]:
         awaitables = []
         course_name = removeDisallowedFilenameChars(course_name)
         course_dir = os.path.join(BASE_DIR, course_name, section_name)
@@ -222,7 +233,7 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
 
         tasks = []
         for x in course_sections:
-            tasks.append(queue_course_section(sem, x, course_dir))
+            tasks.append(queue_course_section(sem, x, course_dir, save_html))
 
         for x in await asyncio.gather(*tasks):
             awaitables += x
@@ -234,14 +245,14 @@ async def queue_enroled_courses() -> List[asyncio.Future]:
         match = regex.match(html.unescape(course["fullname"]))
         if not match:
             continue
-        tasks.append(process(sem, course, match[1], match[2]))
+        tasks.append(process(sem, course, match[1], match[2], save_html))
 
     for x in await asyncio.gather(*tasks):
         awaitables += x
     return awaitables
 
 
-async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str) -> List[asyncio.Future]:
+async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, course_dir: str, save_html: bool) -> List[asyncio.Future]:
     # create folder with name of the course_section
     awaitables = []
     course_section_name = removeDisallowedFilenameChars(course_section["name"])[:50].strip()
@@ -264,24 +275,30 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
             download_link = get_final_download_link(link, TOKEN)
             awaitables.append(add_to_download_queue(download_link, course_section_dir, "", "", -1))
 
+    if save_html and len(summary) > 0:
+        awaitables.append(add_to_html_queue(summary, course_section_dir, course_section_name, ".html", len(summary)))
+
     if "modules" not in course_section:
         return awaitables
 
     tasks = []
     for module in course_section["modules"]:
-        tasks.append(queue_module(sem, module, course_section_dir))
+        tasks.append(queue_module(sem, module, course_section_dir, save_html))
 
     for x in await asyncio.gather(*tasks):
         awaitables += x
     return awaitables
 
 
-async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str) -> List[asyncio.Future]:
+async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir: str, save_html: bool) -> List[asyncio.Future]:
     # if it's a forum, there will be discussions each of which need a folder
     awaitables = []
     module_name = removeDisallowedFilenameChars(module["name"])[:50].strip()
     module_dir = os.path.join(course_section_dir, module_name)
     awaitables.append(async_makedirs(module_dir))
+
+    if save_html and "description" in module and len(module["description"]) > 0:
+        awaitables.append(add_to_html_queue(module["description"], module_dir, module_name, ".html", len(module["description"])))
 
     if module["modname"].lower() in ("resource", "folder"):
         if 'contents' in module:
@@ -314,7 +331,19 @@ async def queue_module(sem: asyncio.Semaphore, module: dict, course_section_dir:
             forum_discussion_dir = os.path.join(module_dir, forum_discussion_name)
             awaitables.append(async_makedirs(forum_discussion_dir))
 
-            if isinstance(forum_discussion["attachment"], list):
+
+            if (save_html and "message" in forum_discussion and len(forum_discussion["message"]) > 0):
+                awaitables.append(
+                    add_to_html_queue(
+                        forum_discussion["message"],
+                        forum_discussion_dir,
+                        forum_discussion_name,
+                        ".html",
+                        len(forum_discussion["message"]),
+                    )
+                )
+
+
                 for attachment in forum_discussion["attachments"]:
                     file_url = get_final_download_link(attachment["fileurl"], TOKEN)
                     file_name = removeDisallowedFilenameChars(attachment["filename"])
@@ -448,7 +477,7 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
             return
 
         if file_size >= MAX_DOWNLOAD_SIZE * 1024 * 1024:
-            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds 500MiB')
+            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds {humanized_sizeof(MAX_DOWNLOAD_SIZE * 1024 * 1024)}')
             return
 
         download_queue.put((file_url, file_dir, file_name, file_ext))
@@ -458,11 +487,41 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
     return loop.run_in_executor(None, pfunc)
 
 
+def add_to_html_queue(
+    html: str, file_dir: str, file_name: str, file_ext: str, file_size: int = -1
+) -> asyncio.Future:
+    def process(
+        html: str, file_dir: str, file_name: str, file_ext: str, file_size: int
+    ):
+        # Check if file already exists and only then add it to the queue
+        path = os.path.join(file_dir, file_name + file_ext)
+        if not file_size == -1 and os.path.exists(path) and os.stat(path).st_size == file_size:
+            return
+
+        if file_size >= MAX_DOWNLOAD_SIZE * 1024 * 1024:
+            logger.info(f"Skipping html file: {file_name + file_ext}, Length={humanized_sizeof(file_size)}, exceeds {humanized_sizeof(MAX_DOWNLOAD_SIZE * 1024 * 1024)}")
+            return
+
+        html_queue.put((html, file_dir, file_name, file_ext))
+
+    loop = asyncio.get_event_loop()
+    pfunc = partial(process, html, file_dir, file_name, file_ext, file_size)
+    return loop.run_in_executor(None, pfunc)
+
+
 async def process_download_queue() -> List[bool]:
     tasks = []
     sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     for param in list(download_queue.queue):
         tasks.append(download_file(sem, *param))
+    return await asyncio.gather(*tasks)
+
+
+async def process_html_queue() -> List[bool]:
+    tasks = []
+    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
+    for param in list(html_queue.queue):
+        tasks.append(save_html_file(sem, *param))
     return await asyncio.gather(*tasks)
 
 
@@ -507,6 +566,28 @@ async def download_file(
             return True
     except BaseException as e:
         logger.warning(f'Exception "{type(e)}: {str(e)}" downloading {file_url}... Skipping')
+        return False
+
+
+async def save_html_file(
+    sem: asyncio.Semaphore,
+    html: str,
+    file_dir: str,
+    file_name: str,
+    file_ext: str = "",
+) -> bool:
+    """Save HTML content"""
+    try:
+        path = os.path.join(file_dir, file_name + file_ext)
+        # Ignore if file already exists
+        humanized_length = humanized_sizeof(len(html))
+        logger.info(f"Saving html file: {file_name + file_ext}, Length={humanized_length}")
+
+        with open(path, "w+") as f:
+            f.write(html)
+        return True
+    except BaseException as e:
+        logger.warning(f'Exception "{type(e)}: {str(e)}" saving html file {file_name + file_ext}... Skipping')
         return False
 
 
