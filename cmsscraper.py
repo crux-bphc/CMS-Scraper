@@ -519,7 +519,6 @@ async def process_download_queue() -> List[bool]:
 
 async def process_html_queue() -> List[bool]:
     tasks = []
-    sem = asyncio.Semaphore(SEMAPHORE_COUNT)
     for param in list(html_queue.queue):
         tasks.append(save_html_file(sem, *param))
     return await asyncio.gather(*tasks)
