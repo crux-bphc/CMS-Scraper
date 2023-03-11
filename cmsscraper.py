@@ -253,8 +253,6 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
     if summary:
         soup = BeautifulSoup(summary, features="lxml")
         anchors = soup.find_all('a')
-        if not anchors:
-            return awaitables
         for anchor in anchors:
             link = anchor.get('href')
             # Download the file only if it's on the same domain
