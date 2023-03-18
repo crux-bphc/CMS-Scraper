@@ -253,8 +253,6 @@ async def queue_course_section(sem: asyncio.Semaphore, course_section: dict, cou
     if summary:
         soup = BeautifulSoup(summary, features="lxml")
         anchors = soup.find_all('a')
-        if not anchors:
-            return awaitables
         for anchor in anchors:
             link = anchor.get('href')
             # Download the file only if it's on the same domain
@@ -448,7 +446,7 @@ def add_to_download_queue(file_url: str, file_dir: str, file_name: str, file_ext
             return
 
         if file_size >= MAX_DOWNLOAD_SIZE * 1024 * 1024:
-            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds 500MiB')
+            logger.info(f'Skipping file: {file_url}, Length={humanized_sizeof(file_size)}, exceeds {humanized_sizeof(MAX_DOWNLOAD_SIZE * 1024 * 1024)}')
             return
 
         download_queue.put((file_url, file_dir, file_name, file_ext))
