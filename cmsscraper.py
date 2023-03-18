@@ -520,7 +520,7 @@ async def process_download_queue() -> List[bool]:
 async def process_html_queue() -> List[bool]:
     tasks = []
     for param in list(html_queue.queue):
-        tasks.append(save_html_file(sem, *param))
+        tasks.append(save_html_file(*param))
     return await asyncio.gather(*tasks)
 
 
@@ -569,7 +569,6 @@ async def download_file(
 
 
 async def save_html_file(
-    sem: asyncio.Semaphore,
     html: str,
     file_dir: str,
     file_name: str,
