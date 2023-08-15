@@ -29,7 +29,7 @@ VALID_FILENAME_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 # pandemic.
 COURSE_CATEGORY_NAME = ""
 
-COURSE_NAME_REGEX = r"^([\w\d \-\/'&,]+) ([LTP]\d*)(\Z|\s)(.*)$"
+COURSE_NAME_REGEX = r"^([\w\d \-\/'&,\.]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
 SEMAPHORE_COUNT = 25
 
