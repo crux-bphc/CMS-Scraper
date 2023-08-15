@@ -69,6 +69,8 @@ session: aiohttp.ClientSession = aiohttp.ClientSession(connector=aiohttp.TCPConn
                                                        timeout=aiohttp.ClientTimeout(total=100))
 
 
+failed_downloads = []
+
 async def main():
 
     global TOKEN
@@ -169,6 +171,8 @@ async def main():
             logger.info(f"Downloading {download_queue.qsize()} files...")
             returns = await process_download_queue()
             logging.info(f'Finished processing downloads... Skipped {returns.count(False)} files')
+            with open('skipped.json', 'w') as f:
+                json.dump(failed_downloads, f)
         else:
             logger.info("No files to download!")
 
@@ -563,6 +567,9 @@ async def download_file(
             return True
     except BaseException as e:
         logger.warning(f'Exception "{type(e)}: {str(e)}" downloading {file_url}... Skipping')
+        length = int(response.headers.get('content-length', 0))
+        humanized_length = humanized_sizeof(length)
+        failed_downloads.append({"file_url": file_url, "file_path": os.path.join(file_dir, file_name + file_ext), "size": humanized_length})
         return False
 
 
