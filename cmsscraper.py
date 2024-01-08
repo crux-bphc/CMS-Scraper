@@ -31,7 +31,7 @@ COURSE_CATEGORY_NAME = ""
 
 COURSE_NAME_REGEX = r"^([\w\d \-\/'&,\.]+) ([LTP]\d*)(\Z|\s)(.*)$"
 
-SEMAPHORE_COUNT = 25
+SEMAPHORE_COUNT = 40
 
 # API Endpoints
 API_BASE = WEB_SERVER + "/webservice/rest/server.php?"
@@ -92,9 +92,10 @@ async def main():
     )
     parser.add_argument('--destination', help='The destination to download files to')
     parser.add_argument('--session-cookie', help='Session cookie obtained after logging in through a browser')
-    parser.add_argument('--unenroll-all', action='store_true', help='Uneroll from all courses. ' +
+    parser.add_argument('--unenroll-all', action='store_true', help='Unenroll from all courses. ' +
                         'If --all and/or --handouts is specified, download and then unenroll all')
-    parser.add_argument('--handouts', action='store_true', help='Download only handouts')
+    parser.add_argument('--handouts', action='store_true', help='Download only handouts for your enrolled courses')
+    parser.add_argument('--lectures', action='store_true', help='Enroll in all lecture courses and download files')
     parser.add_argument('--all', action='store_true', help='Automatically enrol to all courses and download files')
     parser.add_argument("--html", action="store_true", help="Save HTML content as well")
     parser.add_argument('--preserve', action='store_true', help='Preserves the courses you are enrolled to. ' +
@@ -129,9 +130,8 @@ async def main():
     async_makedirs(BASE_DIR)
 
     if args.session_cookie is None:
-        if args.unenroll_all:
-            logger.error("Cannot uneroll from courses without providing session cookie")
-            return
+        logger.error("Cannot work without providing session cookie")
+        return
 
     if args.unenroll_all and args.preserve:
         logger.error("Cannot specify --unenroll-all and --preserve together")
@@ -159,6 +159,9 @@ async def main():
 
         if args.all:
             await enrol_all_courses()
+        
+        if args.lectures:
+            await enrol_all_lec_courses()
 
         # Await any queued futures before we continue
         # If this is not done, synchronization issues will arise
@@ -194,7 +197,15 @@ async def enrol_all_courses():
     """Enroll a user to all courses listed on CMS"""
     logger.info("Enrolling to all courses")
     await enrol_courses(await get_all_courses())
-
+    
+async def enrol_all_lec_courses():
+    """Enroll a user to all the lecture courses listed on CMS"""
+    logger.info("Enrolling to all lecture courses")
+    courses = await get_all_courses()
+    # Check if name has PNumber or TNumber at the end
+    regex = re.compile(r"^([\w\d \-\/'&,\.]+) ([TP]\d*)(\Z|\s)(.*)$")
+    courses = [x for x in courses if not regex.match(html.unescape(x["displayname"]))]
+    await enrol_courses(courses)
 
 async def enrol_courses(courses: dict):
     """Enrol to all specified courses"""
@@ -608,6 +619,7 @@ def get_category_id_from_name(category_name: str) -> int:
 
 
 def get_final_download_link(file_url, token):
+    file_url = file_url.replace("/webservice", "")
     token_parameter = "".join(("&token=", TOKEN) if "?" in file_url else ("?token=", TOKEN))
     return "".join((file_url, token_parameter))
 
